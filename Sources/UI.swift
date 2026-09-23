@@ -450,9 +450,11 @@ struct SettingsView: View {
                         Text("Read Aloud").font(.title3.weight(.semibold))
                         HStack(spacing: 4) {
                             Text("Press"); Keycap(key: Config.hotKeyLabel).foregroundStyle(.primary)
-                            Text("anywhere, point, and ask out loud.")
+                            Text("anywhere, point, and ask.")
                         }
                         .font(.callout).foregroundStyle(.secondary)
+                        Text("Or say “read aloud”, then the request.")
+                            .font(.callout).foregroundStyle(.secondary)
                     }
                 }
                 .padding(.vertical, 4)

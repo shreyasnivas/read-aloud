@@ -446,6 +446,11 @@ enum MCPServer {
 
     /// Spawns this binary as the server, lists tools, calls spotlight and say_progress.
     static func selfTest() -> Int32 {
+        if let problem = HandsFree.selfCheck() {
+            print(problem)
+            return 1
+        }
+        print("hands-free: ok")
         if let problem = Safety.selfCheck() {
             print(problem)
             return 1
