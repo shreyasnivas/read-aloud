@@ -50,9 +50,8 @@ after installing so only one copy with the bundle id exists.
 1. A Carbon hotkey (⌥⇧A) triggers ScreenCaptureKit screenshots of each display,
    and a frozen overlay window is shown on each screen.
 2. SFSpeechRecognizer transcribes on-device while you talk. The HUD shows the
-   live text. While the app is open it also listens for “read aloud”, then the
-   request, and sends that when you go quiet. Talking over the spoken answer
-   stops the speech and listens to the new request.
+   live text. The microphone is only open during this recording, and again
+   while a task is running so “stop” or a yes/no can be heard.
 3. Return closes the overlay at once. A status pill stays up. Annotated
    screenshots, plus a close-up of the marks, go to `claude -p` (model
    `claude-opus-5`) as an operator: `--output-format stream-json`, the MCP

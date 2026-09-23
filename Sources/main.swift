@@ -148,9 +148,6 @@ final class Transcriber {
     private var finished: ((String) -> Void)?
     private(set) var text = ""
     var onPartial: ((String) -> Void)?
-    /// Recognizer ended on its own (pause or error). Not called for stop() or cancel().
-    var onEnd: (() -> Void)?
-    private var suppressEnd = false
 
     static func requestPermissions() async -> String? {
         let speech = await withCheckedContinuation { c in SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) } }
@@ -204,58 +201,13 @@ final class Transcriber {
     private func finish() {
         let f = finished; finished = nil
         task = nil; request = nil
-        let ended = f == nil && !suppressEnd
         f?(text)
-        if ended { onEnd?() }
     }
 
     func cancel() {
-        suppressEnd = true
         if engine.isRunning { engine.stop(); engine.inputNode.removeTap(onBus: 0) }
         task?.cancel(); task = nil; request = nil
         let f = finished; finished = nil; f?(text)
-        suppressEnd = false
-    }
-}
-
-// MARK: - Hands-free (wake phrase, silence, barge-in)
-
-enum HandsFree {
-    /// The product name, said as two words. Kept here so it can change in one place.
-    static let phrase = "read aloud"
-    static let silence: TimeInterval = 1.4
-
-    /// Text after the wake phrase, or nil when the phrase was not said.
-    /// An empty string means they said only the wake phrase.
-    static func command(in transcript: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: #"\bread\s+aloud\b"#, options: .caseInsensitive) else { return nil }
-        let range = NSRange(transcript.startIndex..., in: transcript)
-        guard let match = regex.firstMatch(in: transcript, range: range),
-              let hit = Range(match.range, in: transcript) else { return nil }
-        var rest = transcript[hit.upperBound...]
-        while let first = rest.first, ",.!? :".contains(first) { rest = rest.dropFirst() }
-        return rest.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Drops words that are just the Mac speaking back, so barge-in hears the person.
-    static func withoutEcho(_ transcript: String, echo: String) -> String {
-        let echoed = Set(echo.lowercased().split { !$0.isLetter }.map(String.init))
-        let kept = transcript.split { !$0.isLetter && !$0.isNumber }.map(String.init).filter {
-            !echoed.contains($0.lowercased())
-        }
-        return kept.joined(separator: " ")
-    }
-
-    static func selfCheck() -> String? {
-        let cases: [(Bool, String)] = [
-            (command(in: "read aloud open my downloads") == "open my downloads", "command"),
-            (command(in: "Read aloud, open my Downloads folder.") == "open my Downloads folder.", "comma"),
-            (command(in: "please read aloud") == "", "phrase only"),
-            (command(in: "what time is it") == nil, "no phrase"),
-            (withoutEcho("searching youtube open downloads", echo: "searching YouTube") == "open downloads", "echo"),
-        ]
-        let bad = cases.filter { !$0.0 }.map(\.1)
-        return bad.isEmpty ? nil : "hands-free mismatch: \(bad.joined(separator: ", "))"
     }
 }
 
@@ -667,13 +619,6 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var cardThreadID: String?          // thread shown in the answer card
     var forceContinue = false          // "Follow up" button
     var hideWork: DispatchWorkItem?
-    var wakeArmed = false
-    var collectUntilSilence = false
-    var barge = false
-    var lastPartial = ""
-    var lastPartialAt = Date()
-    var wakeRetry = Date.distantPast
-    var earTimer: Timer?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -685,7 +630,6 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.state = .idle
             if self.model.phase == .speaking { self.model.phase = .idle }
             self.scheduleHide(after: 20)
-            self.armWake()
         }
         model.onStop = { [weak self] in self?.stopSpeaking() }
         model.onReplay = { [weak self] in
@@ -702,24 +646,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         transcriber.onPartial = { [weak self] t in
             MainActor.assumeIsolated { self?.heard(t) }
         }
-        transcriber.onEnd = { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.listening = false
-                self.wakeArmed = false
-                if self.collectUntilSilence { self.lastPartialAt = Date().addingTimeInterval(-HandsFree.silence) }
-                self.earTick()
-            }
-        }
-        earTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.earTick() }
-        }
         escape = EscapeToStop(isAppSpeaking: { [weak self] in
             guard let self else { return false }
-            return self.speaker.isSpeaking || self.state == .thinking || self.state == .approving || self.collectUntilSilence
+            return self.speaker.isSpeaking || self.state == .thinking || self.state == .approving
         }, stopApp: { [weak self] in
             guard let self else { return }
-            if self.collectUntilSilence { self.cancelHandsFree(); return }
             if self.state == .approving { self.finishApproval(false, reason: "esc"); return }
             if self.agentRun != nil { self.cancelAgent(reason: "esc"); return }
             self.stopSpeaking()
@@ -765,7 +696,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func updateIcon() {
         let name: String
         switch state {
-        case .idle: name = wakeArmed ? "waveform.badge.mic" : "waveform"
+        case .idle: name = "waveform"
         case .capturing, .listening: name = "waveform.badge.mic"
         case .transcribing, .thinking, .approving: name = "ellipsis.circle"
         case .speaking: name = "speaker.wave.2.fill"
@@ -776,10 +707,6 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Menu is rebuilt each time it opens so history is current.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        if wakeArmed {
-            let ear = menu.addItem(withTitle: "Listening for “\(HandsFree.phrase)”", action: nil, keyEquivalent: "")
-            ear.isEnabled = false
-        }
         let ask = menu.addItem(withTitle: "Ask About Screen", action: #selector(menuCapture), keyEquivalent: "a")
         ask.keyEquivalentModifierMask = [.option, .shift]; ask.target = self
         let stop = menu.addItem(withTitle: "Stop Speaking", action: #selector(menuStop), keyEquivalent: "")
@@ -888,9 +815,6 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         agentRun = nil
         previous?.cancel()
         if approvalWait != nil { finishApproval(false, reason: "superseded") }
-        wakeArmed = false
-        collectUntilSilence = false
-        barge = false
         if listening { transcriber.cancel(); listening = false }
         speaker.stop()
         answerPanel.orderOut(nil)
@@ -977,26 +901,14 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func cancel() {
         transcriber.cancel()
         listening = false
-        wakeArmed = false
-        collectUntilSilence = false
-        barge = false
         state = .idle
         model.phase = .idle
         closeOverlay()
         log("cancelled")
-        armWake()
     }
 
     func submit() {
         guard state == .listening else { return }
-        if collectUntilSilence {
-            let request = barge
-                ? HandsFree.withoutEcho(transcriber.text, echo: echoSource())
-                : (HandsFree.command(in: transcriber.text) ?? "")
-            if request.isEmpty { cancelHandsFree(); return }
-            submitHandsFree(request)
-            return
-        }
         let strokesByShot = views.map { $0.strokes }
         let captured = shots
         closeOverlay()   // the agent needs the live screen
@@ -1090,7 +1002,6 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             state = .speaking
             showAnswerPanel()
             speaker.speak(file: lastAnswerFile!)
-            listenForBarge()
             DispatchQueue.main.async { self.answerPanel.refit() }
         } catch is AgentStopped {
             guard token == requestToken else { return }
@@ -1107,7 +1018,6 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             state = .idle
             showPill()
             scheduleHidePill(after: 8)
-            armWake()
         } catch {
             entry.error = error.localizedDescription
             History.save(entry, in: dir)
@@ -1247,131 +1157,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func heard(_ text: String) {
-        if collectUntilSilence {
-            lastPartial = text
-            lastPartialAt = Date()
-            if !barge, let cmd = HandsFree.command(in: text), !cmd.isEmpty { model.statusLine = cmd }
-            return
-        }
         if state == .listening { model.transcript = text; return }
-        if wakeArmed {
-            lastPartial = text
-            lastPartialAt = Date()
-            guard let cmd = HandsFree.command(in: text) else { return }
-            collectUntilSilence = true
-            wakeArmed = false
-            state = .listening
-            model.phase = .listening
-            model.statusLine = cmd.isEmpty ? "Listening…" : cmd
-            showPill()
-            log("wake: \(text.prefix(80))")
-            return
-        }
         guard listening else { return }
-        let fresh = HandsFree.withoutEcho(text, echo: echoSource())
-        if saidStop(fresh) { cancelAgent(reason: "said stop"); return }
-        if state == .approving, let yes = yesNo(text) { finishApproval(yes, reason: "speech"); return }
-        if (state == .speaking || speaker.isSpeaking) && fresh.split(separator: " ").count >= 2 {
-            startBarge(text)
-        }
-    }
-
-    func echoSource() -> String {
-        [model.answer, model.statusLine, model.approvalQuestion].joined(separator: " ")
-    }
-
-    func earTick() {
-        if collectUntilSilence, Date().timeIntervalSince(lastPartialAt) >= HandsFree.silence {
-            let request = barge
-                ? HandsFree.withoutEcho(lastPartial, echo: echoSource())
-                : (HandsFree.command(in: lastPartial) ?? "")
-            if request.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                cancelHandsFree()
-            } else {
-                log("hands-free: \(request.prefix(80))")
-                submitHandsFree(request)
-            }
-            return
-        }
-        if state == .idle, agentRun == nil, !speaker.isSpeaking, windows.isEmpty, !listening, !collectUntilSilence {
-            armWake()
-        }
-    }
-
-    func armWake() {
-        guard state == .idle, !collectUntilSilence, !speaker.isSpeaking, agentRun == nil else { return }
-        guard Date() >= wakeRetry else { return }
-        do {
-            try transcriber.start()
-            listening = true
-            wakeArmed = true
-            updateIcon()
-        } catch {
-            wakeArmed = false
-            listening = false
-            wakeRetry = Date().addingTimeInterval(5)
-            log("wake listener failed: \(error.localizedDescription)")
-        }
-    }
-
-    func listenForBarge() {
-        wakeArmed = false
-        collectUntilSilence = false
-        barge = false
-        do { try transcriber.start(); listening = true }
-        catch { listening = false; log("barge listener failed: \(error.localizedDescription)") }
-    }
-
-    func startBarge(_ text: String) {
-        log("barge-in")
-        requestToken += 1
-        speaker.stop()
-        let previous = agentRun
-        agentRun = nil
-        previous?.cancel()
-        if approvalWait != nil { finishApproval(false, reason: "barge") }
-        barge = true
-        collectUntilSilence = true
-        wakeArmed = false
-        state = .listening
-        model.phase = .listening
-        model.statusLine = "Listening…"
-        showPill()
-        lastPartial = text
-        lastPartialAt = Date()
-    }
-
-    func cancelHandsFree() {
-        collectUntilSilence = false
-        barge = false
-        wakeArmed = false
-        if listening { transcriber.cancel(); listening = false }
-        pill.orderOut(nil)
-        state = .idle
-        model.phase = .idle
-        armWake()
-    }
-
-    func submitHandsFree(_ request: String) {
-        collectUntilSilence = false
-        barge = false
-        wakeArmed = false
-        closeOverlay()
-        state = .transcribing
-        model.phase = .thinking
-        model.statusLine = "Working…"
-        model.question = request
-        showPill()
-        if let latest = Threads.all().first {
-            model.hasThread = true
-            model.continuing = Date().timeIntervalSince(latest.lastUsed) < Threads.continueWindow
-            model.threadTitle = latest.title
-        }
-        let token = requestToken
-        Task {
-            if listening { _ = await transcriber.stop(); listening = false }
-            await runAgent(transcript: request, strokesByShot: [], captured: [], token: token)
-        }
+        if saidStop(text) { cancelAgent(reason: "said stop"); return }
+        if state == .approving, let yes = yesNo(text) { finishApproval(yes, reason: "speech") }
     }
 
     func saidStop(_ text: String) -> Bool { words(text).contains("stop") }

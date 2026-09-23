@@ -453,8 +453,6 @@ struct SettingsView: View {
                             Text("anywhere, point, and ask.")
                         }
                         .font(.callout).foregroundStyle(.secondary)
-                        Text("Or say “read aloud”, then the request.")
-                            .font(.callout).foregroundStyle(.secondary)
                     }
                 }
                 .padding(.vertical, 4)

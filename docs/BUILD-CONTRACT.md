@@ -273,3 +273,6 @@ Append to the handoff log below at every milestone gate.
   Unverified, needs a person to speak: S11 (“read aloud, open my downloads”,
   no key) and S12 (talk over the answer). S9 and S10 are ready to try now that
   Accessibility is on. I did not click or type.
+- 2026-09-23, Grok: Shreyas rejected the wake phrase. A command starts only when
+  he presses ⌥⇧A. He talks, draws, and the screen is captured, then Return
+  sends it and Escape cancels. The mic is not open while the app is idle.
