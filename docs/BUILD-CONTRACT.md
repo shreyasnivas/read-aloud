@@ -239,3 +239,22 @@ Append to the handoff log below at every milestone gate.
   start a real Claude session), S7 (Esc or saying stop mid-task), S8 (follow-up
   in the same thread), and the live pill with a spoken or keyed yes/no.
   S2 still needs a person if the deck should actually open.
+- 2026-09-23, Grok: M2 gate. Click, type_text, key, scroll, and ax_tree are in the
+  MCP server. Screenshot pixels convert to screen points in the server.
+  System Settings asks once per request. Headless runs (`--approve deny`) refuse
+  click, type, key, and scroll so a self-test cannot post events. Accessibility
+  is in the Settings list and on the launch line.
+  Tested: `./build.sh` installed and launched the app. The launch line was
+  `Screen Recording=yes, Microphone=yes, Speech Recognition=yes, Accessibility=NO`.
+  `--mcp-selftest` printed `coord: ok` (display 1's top-left pixel maps to the
+  primary display's top-left), the twelve tools, `click headless deny: ok`, and
+  an ax_tree of the front window (`AXWindow "New chat - Claude - Comet…"` with a
+  position). `safety: ok` and `mcp-selftest: ok`.
+  `--selftest "What's in the red circle?"` again did two turns (12.2s, then 8.4s)
+  and the second remembered the first. Exit 0.
+  `--selftest-agent "Open my Downloads folder"` called open_target on
+  `/Users/shreyas/Downloads` and read Finder's front window. Result: "Downloads
+  is open in Finder now." No click was posted. Exit 0.
+  Unverified, needs a person, and Accessibility has to be turned on first: S9
+  (dark mode in System Settings) and S10 (a Keynote slide). I did not send any
+  synthetic click or keystroke. M3 was not started.
