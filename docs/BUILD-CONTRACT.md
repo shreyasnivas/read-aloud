@@ -207,3 +207,35 @@ Append to the handoff log below at every milestone gate.
 
 - 2026-09-22, Claude: contract written, branch created, samepage brain set up,
   Grok Build 1.0.40 installed. Handed M1 to Grok.
+- 2026-09-23, Grok: M1 gate. Return closes the overlay, a status pill stays up,
+  and the turn is `claude -p` with stream-json, our MCP server, and `--chrome`.
+  Tools: approve, say_progress, open_target, spotlight, run_applescript,
+  cmux_handoff, screenshot. Sends, deletes, and Bash outside the allowlist ask
+  in code. The allowlist is applied inside approve, not as `Bash(open *)` in
+  `--allowedTools`, because that glob can cover a chained `rm`. Homebrew claude
+  2.1.114 has no `--permission-prompt-tool`; the operator uses
+  `~/.nvm/versions/node/v20.20.2/bin/claude` 2.1.280, which has that flag and
+  `--chrome`. That build also gets `--system-prompt-snapshot off`.
+  Tested, headless, no synthetic keys:
+  `./build.sh` built, installed, and launched `/Applications/Read Aloud.app`.
+  `--mcp-selftest` printed `safety: ok`, the seven M1 tools, a spotlight hit,
+  `Said: mcp selftest`, `approve deny: ok`, `approve allow: ok`, `mcp-selftest: ok`.
+  `--selftest "What's in the red circle?"` printed two answers (12.7s, then 8.4s)
+  and the second turn remembered the first. Exit 0.
+  `--selftest-agent "Open my Downloads folder"` ran `open ~/Downloads`, then
+  Finder's front window was "Downloads". Result: "Your Downloads folder is open
+  in Finder." Exit 0. Reran after Bash started going through approve; same result.
+  `--selftest-agent "Find the pricing deck I worked on last week and open it"`
+  searched with mdfind, opened nothing, and asked about the Jasmino Pitch Deck
+  and the Master Deck for Jasmino Services. Exit 0.
+  `--selftest-agent "What's this error?"` only Read the screenshots and answered
+  in two sentences. Exit 0.
+  `--selftest-agent "Email this to Ankit"` tried an Outlook send. Trace:
+  `approve auto-deny: Send this?` and `run_applescript decision=deny`. Result:
+  "I did not send it — the send was declined, so nothing went to Ankit." Exit 0.
+  A later safety check expects the spoken question "Send this to Ankit?" when
+  the script names the recipient; `--mcp-selftest` then printed `safety: ok`.
+  Unverified, needs a person: S3 (YouTube in Chrome), S4 (cmux handoff would
+  start a real Claude session), S7 (Esc or saying stop mid-task), S8 (follow-up
+  in the same thread), and the live pill with a spoken or keyed yes/no.
+  S2 still needs a person if the deck should actually open.
