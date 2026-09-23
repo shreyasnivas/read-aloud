@@ -258,3 +258,18 @@ Append to the handoff log below at every milestone gate.
   Unverified, needs a person, and Accessibility has to be turned on first: S9
   (dark mode in System Settings) and S10 (a Keynote slide). I did not send any
   synthetic click or keystroke. M3 was not started.
+- 2026-09-23, Grok: M3 gate. Shreyas granted Accessibility and said to finish.
+  While the app is open it listens on-device for “read aloud”, uses the words
+  after that phrase, and sends them once speech has been quiet for 1.4 seconds.
+  Talking over the spoken answer, with words that are not the answer, stops the
+  speech and listens for the new request. Quitting the app releases the mic.
+  The phrase is the product name.
+  Tested: `./build.sh` installed and launched. The launch line was
+  `Screen Recording=yes, Microphone=yes, Speech Recognition=yes, Accessibility=yes`.
+  `--mcp-selftest` printed `hands-free: ok`, `coord: ok`, `click headless deny: ok`,
+  an accessibility tree of the front window, and `mcp-selftest: ok`.
+  `--selftest "What's in the red circle?"` did two turns (15.7s, then 9.4s) and
+  the second remembered the first. Exit 0.
+  Unverified, needs a person to speak: S11 (“read aloud, open my downloads”,
+  no key) and S12 (talk over the answer). S9 and S10 are ready to try now that
+  Accessibility is on. I did not click or type.
