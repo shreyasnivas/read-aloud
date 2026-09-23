@@ -22,7 +22,8 @@ tools/make-signing-cert.sh  one-time local signing certificate (keeps permission
 ```
 
 No Xcode project and no dependencies: just the command line tools and system
-frameworks (AppKit, SwiftUI, ScreenCaptureKit, Speech, AVFoundation, Carbon).
+frameworks (AppKit, SwiftUI, ScreenCaptureKit, Speech, AVFoundation, Carbon,
+ApplicationServices).
 
 ## Build, run, test
 
@@ -40,7 +41,7 @@ open -n "/Applications/Read Aloud.app" --args --transcribe-file x.aiff   # write
 ```
 
 Log: `~/Library/Logs/ReadAloud.log`. The first line at each launch records the
-state of all three permissions. Crash reports:
+state of Screen Recording, Microphone, Speech Recognition, and Accessibility. Crash reports:
 `~/Library/Logs/DiagnosticReports/ReadAloud-*.ips`. Delete `build/Read Aloud.app`
 after installing so only one copy with the bundle id exists.
 
@@ -55,7 +56,9 @@ after installing so only one copy with the bundle id exists.
    `claude-opus-5`) as an operator: `--output-format stream-json`, the MCP
    server in this binary, `--chrome`, and a Bash allowlist checked in code. The server's tools
    open files and apps, search with Spotlight, run AppleScript, hand a long job
-   to cmux, take a fresh screenshot, and speak one progress line. Anything that
+   to cmux, take a fresh screenshot, and speak one progress line. It can also
+   click, type, and scroll using pixels from that screenshot, and read the
+   accessibility tree. System Settings asks once. Anything that
    sends, deletes, buys, or is outside that allowlist asks first; Esc or a
    spoken "stop" kills the process group. A question is still just answered.
    cwd is `~/Library/Application Support/Read Aloud/`. Timeout is 600 seconds.
@@ -87,7 +90,7 @@ it afterwards. While a permission question is up, Esc means no. It also stops a
   certificate (`tools/make-signing-cert.sh`; name from `SIGN_IDENTITY` or an
   untracked `.signing-identity` file). The designated requirement is the bundle id plus
   the certificate leaf, so TCC permissions survive rebuilds. Ad-hoc signing
-  resets Screen Recording, Mic and Speech on every build. If permissions look
+  resets Screen Recording, Microphone, Speech Recognition, and Accessibility on every build. If permissions look
   on but are refused, run `tccutil reset All dev.readaloud.ReadAloud` and
   grant again. Screen Recording needs a relaunch (Settings has Quit & Reopen).
 - **Keep SwiftUI hosting views fixed-size** (`sizingOptions = []`, explicit

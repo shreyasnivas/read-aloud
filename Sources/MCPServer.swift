@@ -392,6 +392,20 @@ final class AgentSocketServer {
             let d = req["detail"] as? String ?? ""
             let allow = AgentBridge.shared.approve(question: q, detail: d)
             return ["ok": true, "allow": allow]
+        case "frontmost":
+            // The MCP child often sees loginwindow. The running app has the real one.
+            let wanted = (req["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let app: NSRunningApplication?
+            if let wanted, !wanted.isEmpty {
+                app = NSWorkspace.shared.runningApplications.first {
+                    $0.localizedName?.caseInsensitiveCompare(wanted) == .orderedSame
+                        || $0.bundleIdentifier?.caseInsensitiveCompare(wanted) == .orderedSame
+                }
+            } else {
+                app = NSWorkspace.shared.frontmostApplication
+            }
+            guard let app else { return ["ok": false] }
+            return ["ok": true, "name": app.localizedName ?? "", "bundle": app.bundleIdentifier ?? "", "pid": Int(app.processIdentifier)]
         default:
             return ["ok": false]
         }
@@ -436,6 +450,11 @@ enum MCPServer {
             print(problem)
             return 1
         }
+        if let problem = Control.coordinateCheck() {
+            print("coord: \(problem)")
+            return 1
+        }
+        if NSScreen.screens.first != nil { print("coord: ok") }
         print("safety: ok")
         let exe = Agent.executablePath()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("readaloud-mcp-selftest-\(getpid())", isDirectory: true)
@@ -466,7 +485,8 @@ enum MCPServer {
             let listed = try client.request(method: "tools/list", params: [:])
             let tools = (listed["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []
             print("tools: \(tools.joined(separator: ", "))")
-            for name in ["approve", "say_progress", "open_target", "spotlight", "run_applescript", "cmux_handoff", "screenshot"] {
+            for name in ["approve", "say_progress", "open_target", "spotlight", "run_applescript", "cmux_handoff", "screenshot",
+                          "click", "type_text", "key", "scroll", "ax_tree"] {
                 if !tools.contains(name) { failures.append("missing tool \(name)") }
             }
             let spot = try client.call("spotlight", ["query": "kMDItemFSName == 'CLAUDE.md'c"])
@@ -484,6 +504,13 @@ enum MCPServer {
             if !allowed.text.contains("\"behavior\":\"allow\"") && !allowed.text.contains("\"behavior\": \"allow\"") {
                 failures.append("approve did not allow open: \(allowed.text.prefix(200))")
             } else { print("approve allow: ok") }
+            let click = try client.call("click", ["x": 10, "y": 10, "display": 1])
+            if !click.isError || !click.text.localizedCaseInsensitiveContains("denied") {
+                failures.append("headless click was not denied: \(click.text.prefix(160))")
+            } else { print("click headless deny: ok") }
+            let tree = try client.call("ax_tree", [:])
+            let preview = tree.text.replacingOccurrences(of: "\n", with: " | ")
+            print("ax_tree: \(preview.prefix(140))")
         } catch {
             failures.append("\(error)")
         }
@@ -602,7 +629,7 @@ private final class Server {
         case "cmux_handoff": return cmuxHandoff(args)
         case "screenshot": return screenshot(args)
         default:
-            if let extra = Control.perform(name, args, confirm: { self.confirm(question: $0, detail: $1) }) {
+            if let extra = Control.perform(name, args, confirm: { self.confirm(question: $0, detail: $1) }, allowInput: options.approve != "deny") {
                 return extra
             }
             trace("tool \(name) decision=error unknown")

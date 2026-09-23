@@ -2,6 +2,7 @@
 // the Settings window. The app logic in main.swift drives `UIModel`.
 
 import AppKit
+import ApplicationServices
 import AVFoundation
 import ServiceManagement
 import Speech
@@ -60,7 +61,7 @@ struct ClaudeLogin {
 // MARK: - Permissions
 
 enum Permission: String, CaseIterable, Identifiable {
-    case screen = "Screen Recording", microphone = "Microphone", speech = "Speech Recognition"
+    case screen = "Screen Recording", microphone = "Microphone", speech = "Speech Recognition", accessibility = "Accessibility"
     var id: String { rawValue }
 
     var why: String {
@@ -68,6 +69,7 @@ enum Permission: String, CaseIterable, Identifiable {
         case .screen: return "To see what you're pointing at."
         case .microphone: return "To hear your question."
         case .speech: return "To turn it into text, on this Mac."
+        case .accessibility: return "To click and type when you ask."
         }
     }
 
@@ -76,12 +78,13 @@ enum Permission: String, CaseIterable, Identifiable {
         case .screen: return CGPreflightScreenCaptureAccess()
         case .microphone: return AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         case .speech: return SFSpeechRecognizer.authorizationStatus() == .authorized
+        case .accessibility: return AXIsProcessTrusted()
         }
     }
 
     var undetermined: Bool {
         switch self {
-        case .screen: return false
+        case .screen, .accessibility: return false
         case .microphone: return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
         case .speech: return SFSpeechRecognizer.authorizationStatus() == .notDetermined
         }
@@ -93,6 +96,7 @@ enum Permission: String, CaseIterable, Identifiable {
         case .screen: anchor = "Privacy_ScreenCapture"
         case .microphone: anchor = "Privacy_Microphone"
         case .speech: anchor = "Privacy_SpeechRecognition"
+        case .accessibility: anchor = "Privacy_Accessibility"
         }
         return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!
     }
@@ -102,6 +106,10 @@ enum Permission: String, CaseIterable, Identifiable {
         switch self {
         case .screen:
             if !CGRequestScreenCaptureAccess() { NSWorkspace.shared.open(settingsURL) }
+        case .accessibility:
+            let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            let opts = [key: true] as CFDictionary
+            if !AXIsProcessTrustedWithOptions(opts) { NSWorkspace.shared.open(settingsURL) }
         case .microphone:
             if undetermined { _ = await AVCaptureDevice.requestAccess(for: .audio) }
             else { NSWorkspace.shared.open(settingsURL) }
@@ -518,7 +526,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 640)
+        .frame(width: 500, height: 700)
         .onReceive(timer) { _ in tick += 1 }
     }
 }
@@ -542,7 +550,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // permission refresh makes AppKit's layout loop and throw.
         let host = NSHostingView(rootView: SettingsView(speaker: speaker))
         host.sizingOptions = []
-        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 500, height: 640),
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 500, height: 700),
                          styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         w.contentView = host
         w.title = "Read Aloud"

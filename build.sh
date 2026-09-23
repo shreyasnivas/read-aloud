@@ -8,7 +8,7 @@ APP="build/Read Aloud.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 \
-  -framework AppKit -framework ScreenCaptureKit -framework Carbon -framework ServiceManagement -framework Speech -framework AVFoundation -framework SwiftUI \
+  -framework AppKit -framework ApplicationServices -framework ScreenCaptureKit -framework Carbon -framework ServiceManagement -framework Speech -framework AVFoundation -framework SwiftUI \
   Sources/*.swift -o "$APP/Contents/MacOS/ReadAloud"
 cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"

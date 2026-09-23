@@ -39,6 +39,11 @@ enum Agent {
     form submission, git push, sudo, and rm all ask the user first. If the answer \
     is no, do not do it, and say that you did not. To send email, run an AppleScript \
     that sends, so the approval step can stop it.
+
+    When open_target, Spotlight, and AppleScript are not enough, use the GUI: \
+    screenshot, then click, type_text, key, or scroll. x and y are pixels in \
+    that screenshot, origin at the top left. ax_tree reads the focused window \
+    and does not click. Changing System Settings asks once per request.
     """
 
     /// Bash is not in this list on purpose. Claude's `Bash(open *)` rule can
