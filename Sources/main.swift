@@ -760,7 +760,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let model = UIModel()
     lazy var answerPanel = AnswerPanel(model: model)
     lazy var settings = SettingsWindowController(speaker: speaker) { [weak self] in
-        MainActor.assumeIsolated { self?.history.present() }
+        MainActor.assumeIsolated { self?.chat.present() }
     }
     var escape: EscapeToStop?
 
@@ -783,7 +783,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var cardThreadID: String?          // thread shown in the answer card
     var forceContinue = false          // "Follow up" button
     var hideWork: DispatchWorkItem?
-    let history = HistoryWindowController()
+    lazy var chat = ChatWindowController(model: model) { [weak self] in
+        self?.speaker.speak(text: "This is how Remote sounds.")
+    }
 
     /// Another process of this app, by bundle id, excluding ourselves.
     func otherRunningCopy() -> NSRunningApplication? {
@@ -867,8 +869,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if self.agentRun != nil { self.cancelAgent(reason: "esc"); return }
             self.stopSpeaking()
         })
-        history.onContinue = { [weak self] t in self?.openInTerminal(t.id) }
-        history.onOpenPane = { t in
+        let store = ChatStore.shared
+        store.onContinueInCode = { [weak self] t in self?.openInTerminal(t.id) }
+        store.onWatchPane = { t in
             DispatchQueue.global(qos: .utility).async {
                 ThreadPane.ensure(t)
                 if FileManager.default.isExecutableFile(atPath: ThreadPane.cmux) {
@@ -876,6 +879,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+        store.onListen = { [weak self] in self?.begin() }
+        store.onStop = { [weak self] in
+            guard let self else { return }
+            if self.agentRun != nil { self.cancelAgent(reason: "stop button") } else { self.stopSpeaking() }
+        }
+        store.onAsk = { [weak self] text in self?.askTyped(text) }
         installBridge()
         AgentToken.rotate()          // new secret each launch
         AgentSocketServer.shared.start()
@@ -884,8 +893,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.global(qos: .utility).async { _ = Agent.operatorBinary() }
         NSApp.mainMenu = buildMainMenu()
         log("started; hotkey \(Config.hotKeyLabel); " + Permission.allCases.map { "\($0.rawValue)=\($0.granted ? "yes" : "NO")" }.joined(separator: ", "))
-        // Launched by hand (Finder, Spotlight, Dock): show the window. At login: stay in the menu bar.
-        if !launchedAtLogin() || !Permission.allGranted { settings.present() }
+        // Launched by hand (Finder, Spotlight, Dock): open the conversation.
+        // At login: stay in the menu bar until asked for.
+        if !launchedAtLogin() || !Permission.allGranted { chat.present() }
     }
 
     func launchedAtLogin() -> Bool {
@@ -905,6 +915,43 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         m.addItem(.separator())
         m.addItem(withTitle: "Quit Remote", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = m
+        // File: what you can start or hand off.
+        let fileItem = NSMenuItem(); main.addItem(fileItem)
+        let f = NSMenu(title: "File")
+        f.addItem(withTitle: "New Request…", action: #selector(menuCapture), keyEquivalent: "n").target = self
+        f.addItem(withTitle: "New Thread", action: #selector(menuNewThread), keyEquivalent: "N").target = self
+        f.addItem(.separator())
+        f.addItem(withTitle: "Continue Thread in Claude Code", action: #selector(menuContinueInCode), keyEquivalent: "t").target = self
+        f.addItem(withTitle: "Watch Thread in cmux", action: #selector(menuWatchPane), keyEquivalent: "").target = self
+        f.addItem(.separator())
+        f.addItem(withTitle: "Copy Last Transcript", action: #selector(menuCopyTranscript), keyEquivalent: "C").target = self
+        f.addItem(withTitle: "Show Files in Finder", action: #selector(menuShowFiles), keyEquivalent: "").target = self
+        fileItem.submenu = f
+
+        // Edit: so the text box behaves like every other text box on the Mac.
+        let editItem = NSMenuItem(); main.addItem(editItem)
+        let e = NSMenu(title: "Edit")
+        e.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        e.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        e.addItem(.separator())
+        e.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        e.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        e.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        e.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = e
+
+        // View: the conversation, and the things that sit beside it.
+        let viewItem = NSMenuItem(); main.addItem(viewItem)
+        let v = NSMenu(title: "View")
+        v.addItem(withTitle: "Conversation", action: #selector(menuShowHistory), keyEquivalent: "0").target = self
+        v.addItem(withTitle: "Replay Last Answer", action: #selector(menuReplay), keyEquivalent: "r").target = self
+        v.addItem(withTitle: "Stop Speaking", action: #selector(menuStop), keyEquivalent: ".").target = self
+        v.addItem(.separator())
+        v.addItem(withTitle: "Behaviour…", action: #selector(menuSettings), keyEquivalent: "").target = self
+        v.addItem(withTitle: "Permissions…", action: #selector(menuSettings), keyEquivalent: "").target = self
+        v.addItem(withTitle: "Open Log", action: #selector(menuOpenLog), keyEquivalent: "").target = self
+        viewItem.submenu = v
+
         let winItem = NSMenuItem(); main.addItem(winItem)
         let w = NSMenu(title: "Window")
         w.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -913,9 +960,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return main
     }
 
-    // Opening the app again from Finder/Spotlight shows Settings.
+    // Opening the app again from Finder/Spotlight brings the conversation back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        settings.present(); return false
+        chat.present(); return false
     }
 
     func updateIcon() {
@@ -954,7 +1001,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.submenu = sub
         }
         menu.addItem(.separator())
-        menu.addItem(withTitle: "History…", action: #selector(menuShowHistory), keyEquivalent: "y").target = self
+        menu.addItem(withTitle: "Open Remote", action: #selector(menuShowHistory), keyEquivalent: "o").target = self
         menu.addItem(withTitle: "Settings…", action: #selector(menuSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Remote", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -966,7 +1013,41 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stopSpeaking()
     }
     @objc func menuSettings() { settings.present() }
-    @objc func menuShowHistory() { history.present() }
+    @objc func menuShowHistory() { chat.present() }
+
+    @objc func menuNewThread() {
+        forceContinue = false
+        ChatStore.shared.selected = nil
+        begin()
+    }
+
+    @objc func menuContinueInCode() {
+        guard let id = ChatStore.shared.selected ?? Threads.all().first?.id else { return }
+        openInTerminal(id)
+    }
+
+    @objc func menuWatchPane() {
+        guard let t = Threads.all().first(where: { $0.id == ChatStore.shared.selected }) ?? Threads.all().first else { return }
+        ChatStore.shared.onWatchPane?(t)
+    }
+
+    @objc func menuCopyTranscript() {
+        let last = History.all().first?.0.transcript ?? ""
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(last, forType: .string)
+    }
+
+    @objc func menuShowFiles() { NSWorkspace.shared.open(Config.historyDir) }
+
+    @objc func menuReplay() {
+        guard let f = lastAnswerFile else { return }
+        state = .speaking; model.phase = .speaking; speaker.speak(file: f)
+    }
+
+    @objc func menuOpenLog() {
+        NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Remote.log"))
+    }
     /// Show a thread's card and make it the one ⌥⇧A continues.
     @objc func menuOpenThread(_ item: NSMenuItem) {
         guard let id = item.representedObject as? String, var t = Threads.all().first(where: { $0.id == id }) else { return }
@@ -1145,6 +1226,36 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         log("cancelled")
     }
 
+    /// A request typed in the chat window: same turn, no overlay, no marks.
+    func askTyped(_ text: String) {
+        guard state == .idle || state == .speaking else { return }
+        speaker.stop()
+        requestToken += 1
+        let token = requestToken
+        state = .transcribing
+        model.phase = .thinking
+        model.statusLine = "Working…"
+        model.question = text
+        frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
+        cursor = NSEvent.mouseLocation
+        // Continue whatever thread is open in the window, if it's still ours.
+        let target = ChatStore.shared.selected.flatMap { id in Threads.all().first { $0.id == id } }
+        model.continuing = target.map { !Ownership.isTakenOver($0.id) } ?? false
+        forceContinue = model.continuing
+        Task {
+            do {
+                let captured = try await Capture.allDisplays()
+                let (id, dir) = History.newDir()
+                let built = Task.detached(priority: .userInitiated) {
+                    Compose.attachments(captured: captured, strokesByShot: [], cursor: .zero, dir: dir)
+                }
+                await runAgent(transcript: text, captured: captured, token: token, id: id, dir: dir, built: built)
+            } catch {
+                fail("Couldn't capture the screen: \(error.localizedDescription)")
+            }
+        }
+    }
+
     func submit() {
         guard state == .listening else { return }
         let strokesByShot = views.map { $0.strokes }
@@ -1210,6 +1321,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         History.save(entry, in: dir)
         History.prune()
         log("acting (\(isNew ? "new" : "continuing") thread \(thread.id.prefix(8))): \(transcript.prefix(120)) [\(attachments.count) images]")
+        ChatStore.shared.beginTurn(threadID: thread.id, transcript: transcript)
         listenForStop()
         let holder = Agent.Run()
         agentRun = holder
@@ -1223,8 +1335,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                      session: .init(id: thread.id, isNew: isNew, name: "Remote · \(thread.title)"))
                 answer = text
             } else {
-                answer = try await act(thread: thread, isNew: isNew, attachments: attachments, holder: holder, dir: dir) {
-                    actions.add($0)
+                answer = try await act(thread: thread, isNew: isNew, attachments: attachments, holder: holder, dir: dir) { step in
+                    actions.add(step)
+                    Task { @MainActor in ChatStore.shared.addAction(step) }
                 }
             }
             entry.actions = actions.all
@@ -1236,6 +1349,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.secondsToAnswer = Date().timeIntervalSince(started)
             History.save(entry, in: dir)
             log("answered via claude-code in \(String(format: "%.1f", entry.secondsToAnswer!))s")
+            ChatStore.shared.endTurn()
             pill.orderOut(nil)
             lastAnswerFile = dir.appendingPathComponent("answer.txt")
             model.answer = answer
@@ -1253,6 +1367,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.secondsToAnswer = Date().timeIntervalSince(started)
             History.save(entry, in: dir)
             log("stopped")
+            ChatStore.shared.endTurn()
             model.answer = "Stopped."
             model.phase = .stopped
             model.statusLine = "Stopped"
@@ -1263,6 +1378,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.error = error.localizedDescription
             History.save(entry, in: dir)
             log("ask failed: \(error.localizedDescription)")
+            ChatStore.shared.endTurn()
             guard token == requestToken else { return }
             agentRun = nil
             stopCommandListener()
