@@ -22,6 +22,7 @@ final class UIModel: ObservableObject {
     @Published var marks = 0
     @Published var statusLine = ""
     @Published var approvalQuestion = ""
+    @Published var approvalDetail = ""
     // Thread
     @Published var threadTitle = ""
     @Published var hasThread = false
@@ -363,8 +364,15 @@ struct StatusPill: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if model.phase == .approving {
+                if !model.approvalDetail.isEmpty {
+                    Text(model.approvalDetail)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 HStack(spacing: 14) {
-                    Hint(key: "⏎", label: "Yes")
+                    Hint(key: "⌥⇧Y", label: "Yes")
                     Hint(key: "esc", label: "No")
                     Text("or say it").foregroundStyle(.white.opacity(0.6))
                 }
@@ -373,7 +381,7 @@ struct StatusPill: View {
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
-        .frame(width: model.phase == .approving ? 440 : 400, height: model.phase == .approving ? 108 : 52, alignment: .leading)
+        .frame(width: model.phase == .approving ? 460 : 400, height: model.phase == .approving ? 150 : 52, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.78)))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.12), lineWidth: 0.5))
         .environment(\.colorScheme, .dark)
@@ -411,7 +419,7 @@ final class StatusPillPanel: NSPanel {
     func show(on screen: NSScreen?) {
         guard let screen = screen ?? NSScreen.main else { return }
         let approving = modelPhaseApproving
-        let size = approving ? CGSize(width: 460, height: 132) : CGSize(width: 420, height: 76)
+        let size = approving ? CGSize(width: 480, height: 174) : CGSize(width: 420, height: 76)
         host.frame = CGRect(origin: .zero, size: size)
         let f = screen.visibleFrame
         setFrame(CGRect(x: f.midX - size.width / 2, y: f.minY + 28, width: size.width, height: size.height), display: true)

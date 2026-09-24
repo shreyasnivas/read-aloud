@@ -314,6 +314,10 @@ enum Agent {
         // Older builds (the Homebrew 2.1.114 one) don't have the switch at all.
         if help.contains("--system-prompt-snapshot") { args += ["--system-prompt-snapshot", "off"] }
         if help.contains("--chrome") { args.append("--chrome") }
+        // Only Remote's own server. Without this the operator inherits every MCP
+        // server configured for the user, so a web page it reads sits next to
+        // tools that can read mail and calendars.
+        if help.contains("--strict-mcp-config") { args.append("--strict-mcp-config") }
         args += session.isNew ? ["--session-id", session.id, "--name", session.name] : ["--resume", session.id]
         args.append("--allowedTools")
         args.append(contentsOf: allowedToolArgs)

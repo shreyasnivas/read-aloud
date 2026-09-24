@@ -766,6 +766,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.stopSpeaking()
         })
         installBridge()
+        AgentToken.rotate()          // new secret each launch
         AgentSocketServer.shared.start()
         // Resolve the claude binary now, not on the first request: it reads files
         // and, once, runs `claude --help`, which used to block the first turn.
@@ -1208,6 +1209,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func askApproval(question: String, detail: String) async -> Bool {
         log("approve ask: \(question) \(detail.prefix(160))")
         model.approvalQuestion = question
+        // Show what is actually about to run, not only the spoken summary.
+        model.approvalDetail = detail.replacingOccurrences(of: "\n", with: " ").prefix(220).description
         model.statusLine = question
         model.phase = .approving
         state = .approving
@@ -1219,14 +1222,18 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let work = DispatchWorkItem { [weak self] in self?.finishApproval(false, reason: "timeout") }
             approvalTimeout = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
-            returnHotKey = HotKey(keyCode: UInt32(kVK_Return), modifiers: 0) { [weak self] in
-                MainActor.assumeIsolated { self?.finishApproval(true, reason: "return") }
+            // ⌥⇧Y, not a bare Return: a global unscoped Return meant that any
+            // Enter pressed anywhere on the Mac, in Slack or a terminal, silently
+            // approved whatever Remote was asking about.
+            returnHotKey = HotKey(keyCode: UInt32(kVK_ANSI_Y), modifiers: UInt32(optionKey | shiftKey)) { [weak self] in
+                MainActor.assumeIsolated { self?.finishApproval(true, reason: "hotkey") }
             }
         }
     }
 
     func finishApproval(_ allow: Bool, reason: String) {
         guard let cont = approvalWait else { return }
+        model.approvalDetail = ""
         approvalWait = nil
         approvalTimeout?.cancel()
         approvalTimeout = nil

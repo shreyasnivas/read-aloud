@@ -98,6 +98,26 @@ it afterwards. While a permission question is up, Esc means no. It also stops a
   the child env. Don't add an API-key path back.
 - **Set `READBACK_NESTED=1` for every `claude` child.** Stop hooks that speak
   recaps check it and skip the helper session instead of talking over the answer.
+- **The safety policy has to cover every channel, not just text.** Bash and
+  AppleScript text were checked while clicks, typing and `open_target` were not,
+  so the agent could press Send, run a `.command` file, or press a button through
+  AppleScript UI scripting (`perform action "AXPress"`) with no question asked.
+  A click now reads the accessibility label under the pointer and asks on
+  send/delete/buy-like buttons, typing asks in a password field, `open_target`
+  asks before running a file or handing a URL to a custom scheme, and reading a
+  credentials path asks. Add a case to `Safety.selfCheck()` for every new rule.
+
+- **Approvals are authenticated and scoped.** Each launch writes a fresh secret
+  to `agent.token`; the MCP children carry it and the socket refuses anything
+  else, so another local process can't answer "allow" for you. The approve
+  hotkey is ⌥⇧Y, never a bare Return: a global Return meant any Enter pressed
+  anywhere approved the pending question. The pill shows the real command, not
+  only the spoken summary.
+
+- **The operator sees only its own tools.** `--strict-mcp-config` keeps the
+  child away from the user's other MCP servers. Without it a web page it reads
+  sits next to tools that can read mail and calendars.
+
 - **The bundle id stays `dev.readaloud.ReadAloud`.** The app is called Remote; the
   identifier is not, on purpose. TCC keys the Screen Recording, Microphone, Speech
   and Accessibility grants to the bundle id, so changing it means granting all four
