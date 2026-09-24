@@ -371,14 +371,18 @@ final class AgentSocketServer {
             var one: Int32 = 1
             setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
             AgentSocket.setTimeout(c, 70)
-            if let line = AgentSocket.readLine(c, limit: 1024 * 1024), let req = jsonObject(line) {
-                let reply = handle(req)
+            // Each connection on its own queue: an approval can sit for over a
+            // minute waiting for the user, and a spoken progress line behind it
+            // shouldn't have to wait that long to be heard.
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { close(c) }
+                guard let line = AgentSocket.readLine(c, limit: 1024 * 1024), let req = jsonObject(line) else { return }
+                let reply = self.handle(req)
                 if var data = try? JSONSerialization.data(withJSONObject: reply) {
                     data.append(10)
                     _ = data.withUnsafeBytes { write(c, $0.baseAddress, $0.count) }
                 }
             }
-            close(c)
         }
     }
 

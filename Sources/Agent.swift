@@ -103,7 +103,23 @@ enum Agent {
     /// 2.1.281 while the run landed on Homebrew's 2.1.114, which rejected
     /// `--system-prompt-snapshot`. Only a real binary is used, and `launch`
     /// puts its own directory first in PATH so a child `claude` matches.
+    private static var resolvedBinary: String?
+    private static let resolvedLock = NSLock()
+
+    /// Resolved once per launch: the candidate walk reads files and, the first
+    /// time, spawns `claude --help`, which is too slow to redo every turn.
     static func operatorBinary() -> String? {
+        resolvedLock.lock()
+        if let b = resolvedBinary, FileManager.default.isExecutableFile(atPath: b) {
+            resolvedLock.unlock(); return b
+        }
+        resolvedLock.unlock()
+        let found = findOperatorBinary()
+        resolvedLock.lock(); resolvedBinary = found; resolvedLock.unlock()
+        return found
+    }
+
+    private static func findOperatorBinary() -> String? {
         var seen = Set<String>()
         var candidates: [String] = []
         func add(_ path: String) {
@@ -239,10 +255,12 @@ enum Agent {
             dumpTrace(trace)
             print("result: \(text)")
             print("session: \(sid)")
+            try? FileManager.default.removeItem(at: dir)
             exit(0)
         } catch {
             dumpTrace(trace)
             print("selftest-agent failed: \(error)")
+            try? FileManager.default.removeItem(at: dir)
             exit(1)
         }
     }
@@ -266,7 +284,8 @@ enum Agent {
             ],
         ]
         let data = try JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted])
-        try data.write(to: url)
+        // Atomic: a live turn may be reading this file while a self-test rewrites it.
+        try data.write(to: url, options: .atomic)
     }
 
     private static func userPrompt(transcript: String, frontApp: String, attachments: [Attachment]) -> String {
