@@ -9,8 +9,11 @@ Follow-ups stay in a thread. Open source (MIT) at github.com/shreyasnivas/read-a
 ```
 Sources/main.swift     core: hotkeys, capture, overlay, transcription, Claude, speech,
                        history/threads, App controller, self-test, entry point
-Sources/UI.swift       SwiftUI: UIModel, listening HUD, answer card, Settings window,
-                       permissions, Claude Code login check
+Sources/UI.swift       SwiftUI: UIModel, listening HUD, status pill, answer card,
+                       Settings window, permissions, Claude Code login check
+Sources/Agent.swift    operator loop: stream-json `claude -p`, process group, cancel
+Sources/MCPServer.swift  MCP server and M1 tools, safety policy, socket to the app
+Sources/Control.swift  M2 clicks, typing, and the accessibility tree
 Resources/AppIcon.icns app icon (generated, don't hand-edit)
 tools/make-icon.swift  renders the icon: swift tools/make-icon.swift Resources/AppIcon.icns
 Info.plist             LSUIElement app, mic + speech usage strings
@@ -19,7 +22,8 @@ tools/make-signing-cert.sh  one-time local signing certificate (keeps permission
 ```
 
 No Xcode project and no dependencies: just the command line tools and system
-frameworks (AppKit, SwiftUI, ScreenCaptureKit, Speech, AVFoundation, Carbon).
+frameworks (AppKit, SwiftUI, ScreenCaptureKit, Speech, AVFoundation, Carbon,
+ApplicationServices).
 
 ## Build, run, test
 
@@ -27,13 +31,17 @@ frameworks (AppKit, SwiftUI, ScreenCaptureKit, Speech, AVFoundation, Carbon).
 ./build.sh                  # build, install to /Applications, relaunch
 ./build.sh --no-install     # build only, into build/
 "build/Read Aloud.app/Contents/MacOS/ReadAloud" --selftest "What's in the red circle?"
-                            # headless: capture, fake mark, two-turn thread via claude -p
+                            # headless question path: capture, fake mark, two-turn thread
+"build/Read Aloud.app/Contents/MacOS/ReadAloud" --selftest-agent "Open my Downloads folder"
+                            # headless operator: approve auto-denies, prints tool calls
+"build/Read Aloud.app/Contents/MacOS/ReadAloud" --mcp-selftest
+                            # MCP server lists tools, calls spotlight and say_progress
 open -n "/Applications/Read Aloud.app" --args --transcribe-file x.aiff   # writes x.aiff.txt
 "…/MacOS/ReadAloud" --settings   # open Settings at launch (debugging layout)
 ```
 
 Log: `~/Library/Logs/ReadAloud.log`. The first line at each launch records the
-state of all three permissions. Crash reports:
+state of Screen Recording, Microphone, Speech Recognition, and Accessibility. Crash reports:
 `~/Library/Logs/DiagnosticReports/ReadAloud-*.ips`. Delete `build/Read Aloud.app`
 after installing so only one copy with the bundle id exists.
 
@@ -42,12 +50,22 @@ after installing so only one copy with the bundle id exists.
 1. A Carbon hotkey (⌥⇧A) triggers ScreenCaptureKit screenshots of each display,
    and a frozen overlay window is shown on each screen.
 2. SFSpeechRecognizer transcribes on-device while you talk. The HUD shows the
-   live text.
-3. Return sends the annotated screenshots plus a close-up of the marks to
-   `claude -p` (model `claude-opus-5`), with `--allowedTools Read`, cwd
-   `~/Library/Application Support/Read Aloud/`.
-4. The answer is spoken with `/usr/bin/say` (the system voice), and the answer
-   card shows the thread.
+   live text. The microphone is only open during this recording, and again
+   while a task is running so “stop” or a yes/no can be heard.
+3. Return closes the overlay at once. A status pill stays up. Annotated
+   screenshots, plus a close-up of the marks, go to `claude -p` (model
+   `claude-opus-5`) as an operator: `--output-format stream-json`, the MCP
+   server in this binary, `--chrome`, and a Bash allowlist checked in code. The server's tools
+   open files and apps, search with Spotlight, run AppleScript, hand a long job
+   to cmux, take a fresh screenshot, and speak one progress line. It can also
+   click, type, and scroll using pixels from that screenshot, and read the
+   accessibility tree. System Settings asks once. Anything that
+   sends, deletes, buys, or is outside that allowlist asks first; Esc or a
+   spoken "stop" kills the process group. A question is still just answered.
+   cwd is `~/Library/Application Support/Read Aloud/`. Timeout is 600 seconds.
+4. The final line is spoken with `/usr/bin/say` (the system voice), and the
+   answer card shows the thread. Progress lines before that are spoken too;
+   other assistant text is not.
 
 **Threads** are Claude Code sessions. A new thread uses `--session-id <uuid>
 --name …` and follow-ups use `--resume <uuid>`. ⌥⇧A within 15 minutes continues
@@ -56,10 +74,11 @@ the latest thread; Tab in the overlay toggles. "Open in Terminal" runs
 `history/<timestamp>/entry.json` are Read Aloud's own record. Only the newest 3
 threads are kept (`Config.historyLimit`).
 
-**Esc** stops any speech system-wide, but only while something is speaking.
-`EscapeToStop` registers the Esc hotkey during playback and releases it
-afterwards. It also stops a `say` started by any tool that writes its pid to
-`~/.cache/readback/say.pid` (the author uses this with a readback Claude Code skill).
+**Esc** stops any speech system-wide, but only while something is speaking or
+the agent is working. `EscapeToStop` registers the Esc hotkey then and releases
+it afterwards. While a permission question is up, Esc means no. It also stops a
+`say` started by any tool that writes its pid to `~/.cache/readback/say.pid`
+(the author uses this with a readback Claude Code skill).
 
 ## Rules that came from real failures
 
@@ -72,7 +91,7 @@ afterwards. It also stops a `say` started by any tool that writes its pid to
   certificate (`tools/make-signing-cert.sh`; name from `SIGN_IDENTITY` or an
   untracked `.signing-identity` file). The designated requirement is the bundle id plus
   the certificate leaf, so TCC permissions survive rebuilds. Ad-hoc signing
-  resets Screen Recording, Mic and Speech on every build. If permissions look
+  resets Screen Recording, Microphone, Speech Recognition, and Accessibility on every build. If permissions look
   on but are refused, run `tccutil reset All dev.readaloud.ReadAloud` and
   grant again. Screen Recording needs a relaunch (Settings has Quit & Reopen).
 - **Keep SwiftUI hosting views fixed-size** (`sizingOptions = []`, explicit
@@ -87,3 +106,7 @@ afterwards. It also stops a `say` started by any tool that writes its pid to
   to whatever is focused. A synthetic ⌥⇧A with the app not running typed "Å"
   into a terminal, and a stray Esc can interrupt a Claude session. Check that
   the app is running first, and don't do it while the user is typing.
+
+<!-- samepage:start -->
+This project uses **samepage**. Shared brain: `.samepage/`, at the main checkout, shared by every worktree. At session start run `samepage` (add `--task "<what you are about to do>"` when you know it): it prints a short digest of who else is open, what each is doing, the live memory rows and the last lessons. If OVERLAP names a pane, ask before editing those files. Write your own note early with `samepage wip`. Follow `.samepage/PROTOCOL.md`. Do not copy that protocol into this file.
+<!-- samepage:end -->

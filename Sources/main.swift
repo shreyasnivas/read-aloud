@@ -452,6 +452,7 @@ struct Entry: Codable {
     var error: String?
     var secondsToAnswer: Double?
     var threadID: String?
+    var stopped: Bool?
 }
 
 /// A conversation thread = one Claude Code session.
@@ -588,7 +589,7 @@ final class OverlayView: NSView {
 
 @MainActor
 final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    enum State { case idle, capturing, listening, transcribing, thinking, speaking }
+    enum State { case idle, capturing, listening, transcribing, thinking, approving, speaking }
 
     var state: State = .idle { didSet { updateIcon() } }
     var statusItem: NSStatusItem!
@@ -609,6 +610,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let transcriber = Transcriber()
     var listening = false
     var requestToken = 0
+    var agentRun: Agent.Run?
+    lazy var pill = StatusPillPanel(model: model)
+    var approvalWait: CheckedContinuation<Bool, Never>?
+    var approvalTimeout: DispatchWorkItem?
+    var returnHotKey: HotKey?
     var lastAnswerFile: URL?
     var cardThreadID: String?          // thread shown in the answer card
     var forceContinue = false          // "Follow up" button
@@ -638,10 +644,19 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             MainActor.assumeIsolated { self?.hotKeyPressed() }
         }
         transcriber.onPartial = { [weak self] t in
-            MainActor.assumeIsolated { if self?.state == .listening { self?.model.transcript = t } }
+            MainActor.assumeIsolated { self?.heard(t) }
         }
-        escape = EscapeToStop(isAppSpeaking: { [weak self] in self?.speaker.isSpeaking ?? false },
-                              stopApp: { [weak self] in self?.stopSpeaking() })
+        escape = EscapeToStop(isAppSpeaking: { [weak self] in
+            guard let self else { return false }
+            return self.speaker.isSpeaking || self.state == .thinking || self.state == .approving
+        }, stopApp: { [weak self] in
+            guard let self else { return }
+            if self.state == .approving { self.finishApproval(false, reason: "esc"); return }
+            if self.agentRun != nil { self.cancelAgent(reason: "esc"); return }
+            self.stopSpeaking()
+        })
+        installBridge()
+        AgentSocketServer.shared.start()
         NSApp.mainMenu = buildMainMenu()
         log("started; hotkey \(Config.hotKeyLabel); " + Permission.allCases.map { "\($0.rawValue)=\($0.granted ? "yes" : "NO")" }.joined(separator: ", "))
         // Launched by hand (Finder, Spotlight, Dock): show the window. At login: stay in the menu bar.
@@ -683,7 +698,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .idle: name = "waveform"
         case .capturing, .listening: name = "waveform.badge.mic"
-        case .transcribing, .thinking: name = "ellipsis.circle"
+        case .transcribing, .thinking, .approving: name = "ellipsis.circle"
         case .speaking: name = "speaker.wave.2.fill"
         }
         statusItem?.button?.image = NSImage(systemSymbolName: name, accessibilityDescription: Config.appName)
@@ -695,7 +710,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let ask = menu.addItem(withTitle: "Ask About Screen", action: #selector(menuCapture), keyEquivalent: "a")
         ask.keyEquivalentModifierMask = [.option, .shift]; ask.target = self
         let stop = menu.addItem(withTitle: "Stop Speaking", action: #selector(menuStop), keyEquivalent: "")
-        stop.target = self; stop.isEnabled = speaker.isSpeaking
+        stop.target = self; stop.isEnabled = speaker.isSpeaking || agentRun != nil
         menu.addItem(.separator())
         let header = menu.addItem(withTitle: "Threads", action: nil, keyEquivalent: ""); header.isEnabled = false
         let threads = Threads.all()
@@ -721,7 +736,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func menuCapture() { hotKeyPressed() }
-    @objc func menuStop() { stopSpeaking() }
+    @objc func menuStop() {
+        if agentRun != nil { cancelAgent(reason: "menu"); return }
+        stopSpeaking()
+    }
     @objc func menuSettings() { settings.present() }
     @objc func menuShowHistory() { NSWorkspace.shared.open(Config.historyDir) }
     /// Show a thread's card and make it the one ⌥⇧A continues.
@@ -788,13 +806,19 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .listening: submit()
         case .capturing, .transcribing: break
-        case .idle, .thinking, .speaking: begin()
+        case .idle, .thinking, .approving, .speaking: begin()
         }
     }
 
     func begin() {
+        let previous = agentRun
+        agentRun = nil
+        previous?.cancel()
+        if approvalWait != nil { finishApproval(false, reason: "superseded") }
+        if listening { transcriber.cancel(); listening = false }
         speaker.stop()
         answerPanel.orderOut(nil)
+        pill.orderOut(nil)
         requestToken += 1          // a newer request supersedes one still thinking
         state = .capturing
         frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
@@ -885,31 +909,35 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func submit() {
         guard state == .listening else { return }
+        let strokesByShot = views.map { $0.strokes }
+        let captured = shots
+        closeOverlay()   // the agent needs the live screen
         state = .transcribing
-        model.phase = .thinking     // HUD shows "Got it…"
+        model.phase = .thinking
+        model.statusLine = "Working…"
+        showPill()
         let token = requestToken
         Task {
             let transcript = listening ? await transcriber.stop() : ""
             listening = false
-            await ask(transcript: transcript, token: token)
+            await runAgent(transcript: transcript, strokesByShot: strokesByShot, captured: captured, token: token)
         }
     }
 
-    func ask(transcript: String, token: Int) async {
-        let strokesByShot = views.map { $0.strokes }
-        closeOverlay()
+    func runAgent(transcript: String, strokesByShot: [[[CGPoint]]], captured: [DisplayShot], token: Int) async {
         state = .thinking
         model.question = transcript
         model.answer = ""
         model.phase = .thinking
-        showAnswerPanel()
+        model.statusLine = "Working…"
+        showPill()
         let started = Date()
         let (id, dir) = History.newDir()
 
         // Build the attachments: every display annotated, plus a close-up of the marks.
         var attachments: [Attachment] = []
         var marked = false
-        for (i, shot) in shots.enumerated() {
+        for (i, shot) in captured.enumerated() {
             let strokes = i < strokesByShot.count ? strokesByShot[i] : []
             let local = NSMouseInRect(cursor, shot.screen.frame, false)
                 ? CGPoint(x: cursor.x - shot.screen.frame.minX, y: cursor.y - shot.screen.frame.minY) : nil
@@ -917,7 +945,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                   let data = Compose.jpeg(img) else { continue }
             let file = dir.appendingPathComponent("display-\(shot.index).jpg")
             try? data.write(to: file)
-            let where_ = shots.count > 1 ? "Display \(shot.index) of \(shots.count)" : "The screen"
+            let where_ = captured.count > 1 ? "Display \(shot.index) of \(captured.count)" : "The screen"
             attachments.append(Attachment(label: where_ + (strokes.isEmpty ? "" : " (with the user's red marks)"), file: file))
             if let r = Compose.markedRect(strokes, in: shot.screen.frame.size),
                let crop = Compose.crop(img, pointRect: r, scale: shot.scale),
@@ -929,6 +957,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         shots = []   // release the full-resolution captures
+        if token != requestToken { return }
 
         // The thread: continue the latest one, or start a new Claude Code session.
         var thread: ChatThread
@@ -951,46 +980,203 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         entry.threadID = thread.id
         History.save(entry, in: dir)
         History.prune()
-        log("asking (\(isNew ? "new" : "continuing") thread \(thread.id.prefix(8))): \(transcript.prefix(120)) [\(attachments.count) images]")
+        log("acting (\(isNew ? "new" : "continuing") thread \(thread.id.prefix(8))): \(transcript.prefix(120)) [\(attachments.count) images]")
+        listenForStop()
+        let holder = Agent.Run()
+        agentRun = holder
 
         do {
-            let answer: String, backend: String
-            do {
-                (answer, backend) = try await Claude.ask(transcript: transcript, frontApp: frontApp, attachments: attachments,
-                                                         session: .init(id: thread.id, isNew: isNew, name: "Read Aloud · \(thread.title)"))
-            } catch where !isNew {
-                // The session can't be resumed (deleted, or a first turn that failed): start it fresh under the same id.
-                log("resume failed, starting the session fresh: \(error.localizedDescription)")
-                (answer, backend) = try await Claude.ask(transcript: transcript, frontApp: frontApp, attachments: attachments,
-                                                         session: .init(id: thread.id, isNew: true, name: "Read Aloud · \(thread.title)"))
-            }
-            entry.answer = answer; entry.backend = backend
+            let answer = try await act(thread: thread, isNew: isNew, attachments: attachments, holder: holder, dir: dir)
+            guard token == requestToken else { return }
+            agentRun = nil
+            stopCommandListener()
+            entry.answer = answer
+            entry.backend = "claude-code"
             entry.secondsToAnswer = Date().timeIntervalSince(started)
             History.save(entry, in: dir)
-            log("answered via \(backend) in \(String(format: "%.1f", entry.secondsToAnswer!))s")
-            guard token == requestToken else { return }   // superseded
+            log("answered via claude-code in \(String(format: "%.1f", entry.secondsToAnswer!))s")
+            pill.orderOut(nil)
             lastAnswerFile = dir.appendingPathComponent("answer.txt")
             model.answer = answer
             model.phase = .speaking
             state = .speaking
-            answerPanel.refit()
+            showAnswerPanel()
             speaker.speak(file: lastAnswerFile!)
             DispatchQueue.main.async { self.answerPanel.refit() }
+        } catch is AgentStopped {
+            guard token == requestToken else { return }
+            agentRun = nil
+            stopCommandListener()
+            entry.stopped = true
+            entry.answer = "Stopped."
+            entry.secondsToAnswer = Date().timeIntervalSince(started)
+            History.save(entry, in: dir)
+            log("stopped")
+            model.answer = "Stopped."
+            model.phase = .stopped
+            model.statusLine = "Stopped"
+            state = .idle
+            showPill()
+            scheduleHidePill(after: 8)
         } catch {
             entry.error = error.localizedDescription
             History.save(entry, in: dir)
             log("ask failed: \(error.localizedDescription)")
             guard token == requestToken else { return }
+            agentRun = nil
+            stopCommandListener()
             fail("Sorry, I couldn't get an answer from Claude.")
+        }
+    }
+
+    /// One turn. If resuming the Claude session fails, start it fresh under the same id.
+    private func act(thread: ChatThread, isNew: Bool, attachments: [Attachment], holder: Agent.Run, dir: URL) async throws -> String {
+        let name = "Read Aloud · \(thread.title)"
+        do {
+            return try await Agent.run(transcript: model.question, frontApp: frontApp, attachments: attachments,
+                                       session: .init(id: thread.id, isNew: isNew, name: name),
+                                       threadDir: dir, approve: "ask", trace: nil, run: holder) { tool, input in
+                log("model tool \(tool) \(input.prefix(180))")
+            }
+        } catch is AgentStopped {
+            throw AgentStopped()
+        } catch where !isNew {
+            log("resume failed, starting the session fresh: \(error.localizedDescription)")
+            let fresh = Agent.Run()
+            agentRun = fresh
+            return try await Agent.run(transcript: model.question, frontApp: frontApp, attachments: attachments,
+                                       session: .init(id: thread.id, isNew: true, name: name),
+                                       threadDir: dir, approve: "ask", trace: nil, run: fresh) { tool, input in
+                log("model tool \(tool) \(input.prefix(180))")
+            }
         }
     }
 
     func fail(_ message: String) {
         closeOverlay()
+        pill.orderOut(nil)
+        stopCommandListener()
         model.phase = .error(message)
         showAnswerPanel()
         state = .speaking
         speaker.speak(text: message)
+    }
+
+    func showPill() {
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
+        pill.show(on: screen, approving: model.phase == .approving)
+    }
+
+    func scheduleHidePill(after seconds: Double) {
+        hideWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in self?.pill.orderOut(nil) }
+        hideWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: w)
+    }
+
+    func installBridge() {
+        AgentBridge.shared.configure(progress: { [weak self] text in
+            DispatchQueue.main.async {
+                guard let self, self.agentRun != nil else { return }
+                self.model.statusLine = text
+                if self.state != .approving { self.model.phase = .thinking }
+                self.speaker.speak(text: text)
+                self.showPill()
+            }
+        }, approve: { [weak self] question, detail in
+            let sem = DispatchSemaphore(value: 0)
+            var allow = false
+            DispatchQueue.main.async {
+                guard let self else { sem.signal(); return }
+                Task { @MainActor in
+                    allow = await self.askApproval(question: question, detail: detail)
+                    sem.signal()
+                }
+            }
+            if sem.wait(timeout: .now() + 70) == .timedOut { return false }
+            return allow
+        })
+    }
+
+    func askApproval(question: String, detail: String) async -> Bool {
+        log("approve ask: \(question) \(detail.prefix(160))")
+        model.approvalQuestion = question
+        model.statusLine = question
+        model.phase = .approving
+        state = .approving
+        showPill()
+        speaker.speak(text: question)
+        if !listening { listenForStop() }
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            approvalWait = cont
+            let work = DispatchWorkItem { [weak self] in self?.finishApproval(false, reason: "timeout") }
+            approvalTimeout = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
+            returnHotKey = HotKey(keyCode: UInt32(kVK_Return), modifiers: 0) { [weak self] in
+                MainActor.assumeIsolated { self?.finishApproval(true, reason: "return") }
+            }
+        }
+    }
+
+    func finishApproval(_ allow: Bool, reason: String) {
+        guard let cont = approvalWait else { return }
+        approvalWait = nil
+        approvalTimeout?.cancel()
+        approvalTimeout = nil
+        returnHotKey = nil
+        log("approve \(allow ? "yes" : "no") (\(reason))")
+        if state == .approving {
+            state = .thinking
+            model.phase = .thinking
+            model.statusLine = allow ? "Working…" : "Not doing that"
+            showPill()
+        }
+        cont.resume(returning: allow)
+    }
+
+    func cancelAgent(reason: String) {
+        log("stopping agent (\(reason))")
+        agentRun?.cancel()
+        speaker.stop()
+        if approvalWait != nil { finishApproval(false, reason: reason) }
+        model.phase = .stopped
+        model.statusLine = "Stopped"
+        model.answer = "Stopped."
+        state = .thinking
+        showPill()
+    }
+
+    func listenForStop() {
+        do { try transcriber.start(); listening = true }
+        catch { listening = false; log("command listener failed: \(error.localizedDescription)") }
+    }
+
+    func stopCommandListener() {
+        guard state != .listening else { return }
+        if listening { transcriber.cancel(); listening = false }
+    }
+
+    func heard(_ text: String) {
+        if state == .listening { model.transcript = text; return }
+        guard listening else { return }
+        if saidStop(text) { cancelAgent(reason: "said stop"); return }
+        if state == .approving, let yes = yesNo(text) { finishApproval(yes, reason: "speech") }
+    }
+
+    func saidStop(_ text: String) -> Bool { words(text).contains("stop") }
+
+    func yesNo(_ text: String) -> Bool? {
+        let w = words(text)
+        let no: Set<String> = ["no", "nope", "nah", "cancel"]
+        let yes: Set<String> = ["yes", "yeah", "yep", "yup", "ok", "okay", "sure"]
+        let lower = text.lowercased()
+        if lower.contains("do not") || lower.contains("don't") || w.contains(where: { no.contains($0) }) { return false }
+        if lower.contains("go ahead") || w.contains(where: { yes.contains($0) }) { return true }
+        return nil
+    }
+
+    func words(_ text: String) -> [String] {
+        text.lowercased().split { !$0.isLetter }.map(String.init)
     }
 }
 
@@ -1053,7 +1239,15 @@ func transcribeFileTest(_ path: String) async {
 }
 
 let args = CommandLine.arguments
-if let i = args.firstIndex(of: "--transcribe-file"), i + 1 < args.count {
+if args.contains("--mcp-server") {
+    MCPServer.serve(args)
+} else if args.contains("--mcp-selftest") {
+    exit(MCPServer.selfTest())
+} else if let i = args.firstIndex(of: "--selftest-agent") {
+    let q = i + 1 < args.count && !args[i + 1].hasPrefix("--") ? args[i + 1] : "Open my Downloads folder"
+    Task { await Agent.selfTest(request: q) }
+    RunLoop.main.run()
+} else if let i = args.firstIndex(of: "--transcribe-file"), i + 1 < args.count {
     let f = args[i + 1]
     Task { await transcribeFileTest(f) }
     RunLoop.main.run()

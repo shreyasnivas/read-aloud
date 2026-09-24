@@ -2,6 +2,7 @@
 // the Settings window. The app logic in main.swift drives `UIModel`.
 
 import AppKit
+import ApplicationServices
 import AVFoundation
 import ServiceManagement
 import Speech
@@ -11,7 +12,7 @@ import SwiftUI
 
 @MainActor
 final class UIModel: ObservableObject {
-    enum Phase: Equatable { case idle, listening, thinking, speaking, error(String) }
+    enum Phase: Equatable { case idle, listening, thinking, approving, speaking, stopped, error(String) }
 
     @Published var phase: Phase = .idle
     @Published var transcript = ""
@@ -19,6 +20,8 @@ final class UIModel: ObservableObject {
     @Published var answer = ""
     @Published var question = ""
     @Published var marks = 0
+    @Published var statusLine = ""
+    @Published var approvalQuestion = ""
     // Thread
     @Published var threadTitle = ""
     @Published var hasThread = false
@@ -58,7 +61,7 @@ struct ClaudeLogin {
 // MARK: - Permissions
 
 enum Permission: String, CaseIterable, Identifiable {
-    case screen = "Screen Recording", microphone = "Microphone", speech = "Speech Recognition"
+    case screen = "Screen Recording", microphone = "Microphone", speech = "Speech Recognition", accessibility = "Accessibility"
     var id: String { rawValue }
 
     var why: String {
@@ -66,6 +69,7 @@ enum Permission: String, CaseIterable, Identifiable {
         case .screen: return "To see what you're pointing at."
         case .microphone: return "To hear your question."
         case .speech: return "To turn it into text, on this Mac."
+        case .accessibility: return "To click and type when you ask."
         }
     }
 
@@ -74,12 +78,13 @@ enum Permission: String, CaseIterable, Identifiable {
         case .screen: return CGPreflightScreenCaptureAccess()
         case .microphone: return AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         case .speech: return SFSpeechRecognizer.authorizationStatus() == .authorized
+        case .accessibility: return AXIsProcessTrusted()
         }
     }
 
     var undetermined: Bool {
         switch self {
-        case .screen: return false
+        case .screen, .accessibility: return false
         case .microphone: return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
         case .speech: return SFSpeechRecognizer.authorizationStatus() == .notDetermined
         }
@@ -91,6 +96,7 @@ enum Permission: String, CaseIterable, Identifiable {
         case .screen: anchor = "Privacy_ScreenCapture"
         case .microphone: anchor = "Privacy_Microphone"
         case .speech: anchor = "Privacy_SpeechRecognition"
+        case .accessibility: anchor = "Privacy_Accessibility"
         }
         return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!
     }
@@ -100,6 +106,10 @@ enum Permission: String, CaseIterable, Identifiable {
         switch self {
         case .screen:
             if !CGRequestScreenCaptureAccess() { NSWorkspace.shared.open(settingsURL) }
+        case .accessibility:
+            let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            let opts = [key: true] as CFDictionary
+            if !AXIsProcessTrustedWithOptions(opts) { NSWorkspace.shared.open(settingsURL) }
         case .microphone:
             if undetermined { _ = await AVCaptureDevice.requestAccess(for: .audio) }
             else { NSWorkspace.shared.open(settingsURL) }
@@ -236,9 +246,11 @@ struct AnswerCard: View {
                 Text("“\(model.question)”").font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
             }
             switch model.phase {
-            case .thinking:
-                HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Looking at your screen…").foregroundStyle(.secondary) }
+            case .thinking, .approving:
+                HStack(spacing: 8) { ProgressView().controlSize(.small); Text(model.statusLine.isEmpty ? "Working…" : model.statusLine).foregroundStyle(.secondary) }
                     .font(.system(size: 14))
+            case .stopped:
+                Text("Stopped.").font(.system(size: 14))
             case .error(let message):
                 Text(message).font(.system(size: 14))
             default:
@@ -274,8 +286,10 @@ struct AnswerCard: View {
 
     private var title: String {
         switch model.phase {
-        case .thinking: return "Thinking"
+        case .thinking: return "Working"
+        case .approving: return "Asking"
         case .speaking: return "Reading aloud"
+        case .stopped: return "Stopped"
         case .error: return "Something went wrong"
         default: return "Read Aloud"
         }
@@ -283,7 +297,9 @@ struct AnswerCard: View {
     private var icon: String {
         switch model.phase {
         case .thinking: return "sparkles"
+        case .approving: return "questionmark.circle.fill"
         case .speaking: return "speaker.wave.2.fill"
+        case .stopped: return "stop.fill"
         case .error: return "exclamationmark.triangle.fill"
         default: return "waveform"
         }
@@ -325,6 +341,97 @@ final class AnswerPanel: NSPanel {
     }
 }
 
+// MARK: - Status pill (the listening HUD, shrunk, while the agent works)
+
+struct StatusPill: View {
+    @ObservedObject var model: UIModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                if model.phase == .approving {
+                    Image(systemName: "questionmark.circle.fill").foregroundStyle(.yellow)
+                } else if model.phase == .stopped {
+                    Image(systemName: "stop.fill").foregroundStyle(.white.opacity(0.8))
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Text(headline)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if model.phase == .approving {
+                HStack(spacing: 14) {
+                    Hint(key: "⏎", label: "Yes")
+                    Hint(key: "esc", label: "No")
+                    Text("or say it").foregroundStyle(.white.opacity(0.6))
+                }
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.85))
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .frame(width: model.phase == .approving ? 440 : 400, height: model.phase == .approving ? 108 : 52, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.78)))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.12), lineWidth: 0.5))
+        .environment(\.colorScheme, .dark)
+    }
+
+    private var headline: String {
+        switch model.phase {
+        case .approving: return model.approvalQuestion.isEmpty ? "Allow this?" : model.approvalQuestion
+        case .stopped: return "Stopped"
+        default: return model.statusLine.isEmpty ? "Working…" : model.statusLine
+        }
+    }
+}
+
+final class StatusPillPanel: NSPanel {
+    private let host: NSHostingView<StatusPill>
+
+    init(model: UIModel) {
+        let host = NSHostingView(rootView: StatusPill(model: model))
+        host.sizingOptions = []
+        self.host = host
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 420, height: 76),
+                   styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
+        contentView = host
+        isFloatingPanel = true
+        level = .floating
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = false
+        hidesOnDeactivate = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    }
+
+    /// Explicit frames. A self-sizing host plus a timer crashed Settings; this stays fixed.
+    func show(on screen: NSScreen?) {
+        guard let screen = screen ?? NSScreen.main else { return }
+        let approving = modelPhaseApproving
+        let size = approving ? CGSize(width: 460, height: 132) : CGSize(width: 420, height: 76)
+        host.frame = CGRect(origin: .zero, size: size)
+        let f = screen.visibleFrame
+        setFrame(CGRect(x: f.midX - size.width / 2, y: f.minY + 28, width: size.width, height: size.height), display: true)
+        orderFrontRegardless()
+    }
+
+    private var modelPhaseApproving: Bool {
+        // The hosting view's root is not exposed; the window is resized by the app
+        // passing the phase through a stored flag set just before show.
+        approving
+    }
+
+    private var approving = false
+
+    func show(on screen: NSScreen?, approving: Bool) {
+        self.approving = approving
+        show(on: screen)
+    }
+}
+
 // MARK: - Settings
 
 struct SettingsView: View {
@@ -343,7 +450,7 @@ struct SettingsView: View {
                         Text("Read Aloud").font(.title3.weight(.semibold))
                         HStack(spacing: 4) {
                             Text("Press"); Keycap(key: Config.hotKeyLabel).foregroundStyle(.primary)
-                            Text("anywhere, point, and ask out loud.")
+                            Text("anywhere, point, and ask.")
                         }
                         .font(.callout).foregroundStyle(.secondary)
                     }
@@ -419,7 +526,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 640)
+        .frame(width: 500, height: 700)
         .onReceive(timer) { _ in tick += 1 }
     }
 }
@@ -443,7 +550,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // permission refresh makes AppKit's layout loop and throw.
         let host = NSHostingView(rootView: SettingsView(speaker: speaker))
         host.sizingOptions = []
-        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 500, height: 640),
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 500, height: 700),
                          styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         w.contentView = host
         w.title = "Read Aloud"
