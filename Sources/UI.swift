@@ -508,6 +508,78 @@ final class StatusPillPanel: NSPanel {
     }
 }
 
+// MARK: - Small settings (popovers from the chat window)
+
+/// What Remote does when you ask, in one popover instead of a whole screen.
+struct BehaviourPopover: View {
+    var onTestVoice: () -> Void
+    @State private var mode = UserDefaults.standard.string(forKey: "mode") ?? "operator"
+    @State private var threadPane = UserDefaults.standard.object(forKey: "threadPane") as? Bool ?? true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Behaviour").font(.system(size: 13, weight: .semibold))
+            Picker("", selection: $mode) {
+                Text("Do it on my Mac").tag("operator")
+                Text("Just answer").tag("answer")
+            }
+            .pickerStyle(.radioGroup).labelsHidden()
+            .onChange(of: mode) { _, v in UserDefaults.standard.set(v, forKey: "mode") }
+            Text(mode == "operator"
+                 ? "Acts on your screen, and asks out loud before anything that sends, deletes or buys."
+                 : "Looks and answers. Takes no action.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            Toggle("A cmux pane per thread", isOn: $threadPane)
+                .onChange(of: threadPane) { _, v in UserDefaults.standard.set(v, forKey: "threadPane") }
+            Text("Follows the conversation in the background. Press return in it to take the thread over.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            HStack {
+                Button("Test voice", action: onTestVoice)
+                Spacer()
+                Button("All settings…") { NSApp.sendAction(Selector(("menuSettings")), to: nil, from: nil) }
+            }
+        }
+        .padding(14)
+    }
+}
+
+/// The permission list, small enough to sit over the conversation.
+struct PermissionsPopover: View {
+    @State private var tick = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Permissions").font(.system(size: 13, weight: .semibold))
+            let _ = tick
+            ForEach(Permission.allCases) { p in
+                HStack(spacing: 8) {
+                    Image(systemName: p.granted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .foregroundStyle(p.granted ? .green : .orange)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(p.rawValue).font(.system(size: 12, weight: .medium))
+                        Text(p.why).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if !p.granted {
+                        Button(p.undetermined ? "Allow…" : "Settings") { Task { await p.request(); tick += 1 } }
+                            .controlSize(.small)
+                    }
+                }
+            }
+            if !Permission.screen.granted {
+                HStack {
+                    Text("Screen Recording needs a relaunch.").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Quit & Reopen") { Relaunch.now() }.controlSize(.small)
+                }
+            }
+        }
+        .padding(14)
+    }
+}
+
 // MARK: - Settings
 
 struct SettingsView: View {

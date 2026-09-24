@@ -15,7 +15,8 @@ Sources/Agent.swift    operator loop: stream-json `claude -p`, process group, ca
 Sources/MCPServer.swift  MCP server and M1 tools, safety policy, socket to the app
 Sources/Control.swift  M2 clicks, typing, and the accessibility tree
 Sources/ThreadPane.swift  the background cmux pane per thread, takeover, `--follow`
-Sources/HistoryWindow.swift  the thread window: turns, screenshots, actions, handoff
+Sources/ChatWindow.swift  the main window: threads, the conversation, composer,
+                       live turn, ChatStore, the small settings popovers' host
 Resources/AppIcon.icns app icon (generated, don't hand-edit)
 tools/make-icon.swift  renders the icon: swift tools/make-icon.swift Resources/AppIcon.icns
 Info.plist             LSUIElement app, mic + speech usage strings
@@ -82,6 +83,20 @@ process started by a terminal inherits that terminal's privacy attribution, so
 an app launched from a shell whose terminal has no microphone access records
 digital silence with no error. `build.sh` activates it with `osascript`; if you
 launch it by hand, use Spotlight or Finder.
+
+**The window is the app, and it is a conversation.** Remote opens into the chat,
+never into Settings. Threads on the left, messages on the right, a composer at
+the bottom. A message is one request: what you said or typed, the screenshots
+that went with it, what it did (`Entry.actions`), and what it said back. A turn
+in flight draws itself at the end of the thread from `ChatStore`, which the app
+writes into as tool calls stream. Typing in the composer runs `askTyped`, which
+captures the screen and takes the same path as the hotkey without the overlay.
+
+**Settings never replace the conversation.** The menu bar carries File, Edit and
+View; the toolbar has small popovers (`BehaviourPopover`, `PermissionsPopover`).
+The full Settings window still exists behind ⌘, for the long form. The app
+switches to `.regular` activation while the window is open and back to
+`.accessory` when it closes, or its menus can't be reached.
 
 **History is a window, not a folder.** The menu's History item opens a thread
 view: each turn shows what was said, the screenshots that went with it, what the
