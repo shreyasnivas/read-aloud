@@ -8,6 +8,7 @@
 import AppKit
 import Darwin
 import Foundation
+import Security
 
 // MARK: - Safety
 
@@ -38,8 +39,39 @@ enum Safety {
 
     /// Allowlisted Bash runs with no prompt. Anything with a substitution,
     /// a file redirect, a tier-3 word, or a command outside the list asks.
+    /// Nil when opening it is as safe as a double-click on a document.
+    static func openNeedsApproval(_ target: String) -> String? {
+        let t = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = t.lowercased()
+        if let scheme = lower.range(of: "://").map({ String(lower[lower.startIndex..<$0.lowerBound]) }) {
+            let safe = ["http", "https", "file", "ftp"]
+            return safe.contains(scheme) ? nil : "Open this with \(scheme)?"
+        }
+        if lower.hasPrefix("mailto:") { return nil }
+        if lower.contains(":") && !lower.contains("/") && !lower.hasPrefix("-") {
+            // A bare custom scheme such as someapp:run?macro=…
+            return "Open this with another app?"
+        }
+        let runnable = [".command", ".sh", ".bash", ".zsh", ".scpt", ".applescript", ".workflow",
+                        ".app", ".pkg", ".dmg", ".terminal", ".shortcut", ".jar", ".py", ".rb", ".pl"]
+        if let ext = runnable.first(where: { lower.hasSuffix($0) }) {
+            return ext == ".app" ? "Launch this app?" : "Run this file?"
+        }
+        return nil
+    }
+
+    /// Paths worth a spoken question even though reading is otherwise free.
+    static func readsSecrets(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let marks = [".ssh/", "id_rsa", "id_ed25519", ".aws/", ".netrc", ".env", "credentials",
+                     "keychain", "cookies", ".pem", ".p12", ".key", "secrets", "token",
+                     ".config/gh/", ".claude.json", ".npmrc", ".docker/config"]
+        return marks.contains { lower.contains($0) }
+    }
+
     static func bash(_ command: String) -> Decision {
         if isTier3(command) { return .ask(question(tool: "Bash", input: ["command": command])) }
+        if readsSecrets(command) { return .ask("Read a credentials file?") }
         let parts = segments(command)
         if parts.isEmpty { return .ask("Allow this command?") }
         for part in parts {
@@ -102,6 +134,19 @@ enum Safety {
             (!applescriptIsFree("tell application \"System Events\" to keystroke \"a\""), "as keystroke"),
             (!applescriptIsFree("tell application \"Finder\" to delete file \"x\""), "as delete"),
             (question(tool: "run_applescript", input: ["script": "tell application \"Microsoft Outlook\"\nmake new recipient with properties {name:\"Ankit Pandey\"}\nsend newMsg\nend tell"]) == "Send this to Ankit?", "send question"),
+            // Pressing a button through UI scripting, with no word the old list caught.
+            (!applescriptIsFree("tell application \"System Events\"\nget name of front window\ntell process \"Mail\" to perform action \"AXPress\" of button \"Send\" of window 1\nend tell"), "as axpress"),
+            (!bashAllow("osascript -e 'tell application \"System Events\" to tell process \"Mail\" to perform action \"AXPress\" of button 1 of window 1'"), "bash axpress"),
+            // Reading a credentials file is still a question.
+            (!bashAllow("cat ~/.ssh/id_rsa"), "ssh key"),
+            (!bashAllow("cat ~/.aws/credentials"), "aws creds"),
+            (bashAllow("cat ~/Documents/notes.txt"), "ordinary file"),
+            // Opening: a document is free, running something is not.
+            (openNeedsApproval("/Users/me/Documents/deck.key") == nil, "open document"),
+            (openNeedsApproval("https://example.com") == nil, "open web"),
+            (openNeedsApproval("mailto:a@b.com?body=hi") == nil, "open mail"),
+            (openNeedsApproval("~/Downloads/installer.command") != nil, "open command file"),
+            (openNeedsApproval("somemacroapp://run?macro=wipe") != nil, "open custom scheme"),
         ]
         let bad = cases.filter { !$0.0 }.map(\.1)
         return bad.isEmpty ? nil : "safety mismatch: \(bad.joined(separator: ", "))"
@@ -118,7 +163,11 @@ enum Safety {
         let lower = script.lowercased()
         let banned = ["keystroke", "key code", "click ", " click", "delete ", " move ", "duplicate ",
                       "send ", "reply ", "do shell script", "make new", " save", "quit", "close",
-                      "open location", "empty trash", "restart", "shutdown", "eject "]
+                      "open location", "empty trash", "restart", "shutdown", "eject ",
+                      // UI scripting: the standard way to press any button without
+                      // ever writing the word "click".
+                      "perform action", "axpress", "axpick", "axconfirm", "axincrement", "axdecrement",
+                      "perform", "menu item", "system events", "set value of", "tell process"]
         if banned.contains(where: { lower.contains($0) }) { return true }
         let prop = #"set\s+(the\s+)?(name|value|text|contents|position|bounds|size|minimized|zoomed|index|visible|title)\s+of"#
         return lower.range(of: prop, options: .regularExpression) != nil
@@ -257,6 +306,48 @@ enum Safety {
 
 // MARK: - Socket between the MCP process and the app
 
+/// A secret made at launch and given only to the MCP children this app spawns.
+/// Without it, any process running as the same user could connect to the socket
+/// and answer "allow" to every approval the real child asks for.
+enum AgentToken {
+    private static let lock = NSLock()
+    private static var cached: String?
+
+    static var value: String {
+        lock.lock(); defer { lock.unlock() }
+        if let c = cached { return c }
+        let file = Config.supportDir.appendingPathComponent("agent.token")
+        if let existing = try? String(contentsOf: file, encoding: .utf8), existing.count >= 32 {
+            cached = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cached!
+        }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let token = bytes.map { String(format: "%02x", $0) }.joined()
+        try? token.write(to: file, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        cached = token
+        return token
+    }
+
+    /// Fresh secret per launch, so a leaked one dies with the app.
+    static func rotate() {
+        lock.lock(); cached = nil; lock.unlock()
+        try? FileManager.default.removeItem(at: Config.supportDir.appendingPathComponent("agent.token"))
+        _ = value
+    }
+
+    static func matches(_ given: Any?) -> Bool {
+        guard let g = given as? String else { return false }
+        let mine = value
+        guard g.count == mine.count else { return false }
+        // Constant time, so a wrong guess learns nothing from how long it took.
+        var diff: UInt8 = 0
+        for (a, b) in zip(g.utf8, mine.utf8) { diff |= a ^ b }
+        return diff == 0
+    }
+}
+
 enum AgentSocket {
     static var path: String { Config.supportDir.appendingPathComponent("agent.sock").path }
 
@@ -268,7 +359,7 @@ enum AgentSocket {
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         guard connectUnix(fd, path) else { return nil }
         setTimeout(fd, timeout)
-        var body: [String: Any] = ["op": op]
+        var body: [String: Any] = ["op": op, "token": AgentToken.value]
         for (k, v) in fields { body[k] = v }
         guard var data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
         data.append(10)
@@ -371,18 +462,26 @@ final class AgentSocketServer {
             var one: Int32 = 1
             setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
             AgentSocket.setTimeout(c, 70)
-            if let line = AgentSocket.readLine(c, limit: 1024 * 1024), let req = jsonObject(line) {
-                let reply = handle(req)
+            // Each connection on its own queue: an approval can sit for over a
+            // minute waiting for the user, and a spoken progress line behind it
+            // shouldn't have to wait that long to be heard.
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { close(c) }
+                guard let line = AgentSocket.readLine(c, limit: 1024 * 1024), let req = jsonObject(line) else { return }
+                let reply = self.handle(req)
                 if var data = try? JSONSerialization.data(withJSONObject: reply) {
                     data.append(10)
                     _ = data.withUnsafeBytes { write(c, $0.baseAddress, $0.count) }
                 }
             }
-            close(c)
         }
     }
 
     private func handle(_ req: [String: Any]) -> [String: Any] {
+        guard AgentToken.matches(req["token"]) else {
+            log("agent socket: refused a request with no valid token")
+            return ["ok": false, "error": "unauthorised"]
+        }
         switch req["op"] as? String {
         case "progress":
             AgentBridge.shared.progress(req["text"] as? String ?? "")
@@ -463,6 +562,10 @@ enum MCPServer {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = ["--mcp-server", "--approve", "deny", "--thread-dir", dir.path]
+        // Same rule as every other child: the subscription, never API credits.
+        var env = ProcessInfo.processInfo.environment
+        env["ANTHROPIC_API_KEY"] = nil; env["ANTHROPIC_AUTH_TOKEN"] = nil
+        p.environment = env
         let input = Pipe(), output = Pipe(), err = Pipe()
         p.standardInput = input
         p.standardOutput = output
@@ -692,6 +795,15 @@ private final class Server {
         let target = (args["target"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else { return ToolResult(text: "Missing target", isError: true) }
         let reveal = args["reveal"] as? Bool ?? false
+        // `open` runs a .command or a .app the way a double-click does, and hands
+        // any other scheme to whatever app registered it, which can be a macro
+        // runner. Those ask; a document, a folder, a web page and mail do not.
+        if !reveal, let why = Safety.openNeedsApproval(target) {
+            guard confirm(question: why, detail: target) else {
+                trace("tool open_target \(target) decision=deny")
+                return ToolResult(text: "Denied. Nothing was opened.", isError: true)
+            }
+        }
         trace("tool open_target \(target) reveal=\(reveal) decision=allow")
         var argv: [String] = []
         if reveal { argv.append("-R") }

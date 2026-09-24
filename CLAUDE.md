@@ -14,6 +14,7 @@ Sources/UI.swift       SwiftUI: UIModel, listening HUD, status pill, answer card
 Sources/Agent.swift    operator loop: stream-json `claude -p`, process group, cancel
 Sources/MCPServer.swift  MCP server and M1 tools, safety policy, socket to the app
 Sources/Control.swift  M2 clicks, typing, and the accessibility tree
+Sources/ThreadPane.swift  the background cmux pane per thread, takeover, `--follow`
 Resources/AppIcon.icns app icon (generated, don't hand-edit)
 tools/make-icon.swift  renders the icon: swift tools/make-icon.swift Resources/AppIcon.icns
 Info.plist             LSUIElement app, mic + speech usage strings
@@ -67,6 +68,16 @@ after installing so only one copy with the bundle id exists.
    answer card shows the thread. Progress lines before that are spoken too;
    other assistant text is not.
 
+**Every thread gets a pane.** When a thread starts, Remote opens a cmux workspace
+for it in the background, unfocused, running `Remote --follow <thread>`. That
+follower prints the conversation as it happens by reading `history/`, so the
+thread is always there to look at without taking the screen. Only one process
+writes to a Claude Code session: the follower reads, voice writes. Press return
+in the pane and it hands over, writing `taken-over/<thread>` in the support
+directory and exec'ing `claude --resume <id>`; from then on Remote leaves that
+thread alone and a spoken request starts a new one. Turn it off with
+`defaults write dev.readaloud.ReadAloud threadPane -bool false`.
+
 **Threads** are Claude Code sessions. A new thread uses `--session-id <uuid>
 --name …` and follow-ups use `--resume <uuid>`. ⌥⇧A within 15 minutes continues
 the latest thread; Tab in the overlay toggles. "Open in Terminal" runs
@@ -87,6 +98,26 @@ it afterwards. While a permission question is up, Esc means no. It also stops a
   the child env. Don't add an API-key path back.
 - **Set `READBACK_NESTED=1` for every `claude` child.** Stop hooks that speak
   recaps check it and skip the helper session instead of talking over the answer.
+- **The safety policy has to cover every channel, not just text.** Bash and
+  AppleScript text were checked while clicks, typing and `open_target` were not,
+  so the agent could press Send, run a `.command` file, or press a button through
+  AppleScript UI scripting (`perform action "AXPress"`) with no question asked.
+  A click now reads the accessibility label under the pointer and asks on
+  send/delete/buy-like buttons, typing asks in a password field, `open_target`
+  asks before running a file or handing a URL to a custom scheme, and reading a
+  credentials path asks. Add a case to `Safety.selfCheck()` for every new rule.
+
+- **Approvals are authenticated and scoped.** Each launch writes a fresh secret
+  to `agent.token`; the MCP children carry it and the socket refuses anything
+  else, so another local process can't answer "allow" for you. The approve
+  hotkey is ⌥⇧Y, never a bare Return: a global Return meant any Enter pressed
+  anywhere approved the pending question. The pill shows the real command, not
+  only the spoken summary.
+
+- **The operator sees only its own tools.** `--strict-mcp-config` keeps the
+  child away from the user's other MCP servers. Without it a web page it reads
+  sits next to tools that can read mail and calendars.
+
 - **The bundle id stays `dev.readaloud.ReadAloud`.** The app is called Remote; the
   identifier is not, on purpose. TCC keys the Screen Recording, Microphone, Speech
   and Accessibility grants to the bundle id, so changing it means granting all four

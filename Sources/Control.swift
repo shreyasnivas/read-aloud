@@ -52,6 +52,15 @@ enum Control {
                 log("tool \(name) decision=deny settings")
                 return ToolResult(text: "Denied. The setting was not changed.", isError: true)
             }
+            // A click is how you send, delete or buy something without any of
+            // those words appearing in a command, so read what is under the
+            // pointer and ask when it is one of those buttons.
+            if let why = riskUnderPointer(name, args) {
+                guard confirm(why.0, why.1) else {
+                    log("tool \(name) decision=deny content")
+                    return ToolResult(text: "Denied. Nothing was pressed.", isError: true)
+                }
+            }
             switch name {
             case "click": return click(args)
             case "type_text": return typeText(args)
@@ -121,6 +130,68 @@ enum Control {
         }
         guard let app, app.processIdentifier > 0 else { return nil }
         return (app.localizedName ?? "", app.bundleIdentifier ?? "", app.processIdentifier)
+    }
+
+    /// The question to ask before this input, or nil when it is ordinary.
+    static func riskUnderPointer(_ name: String, _ args: [String: Any]) -> (String, String)? {
+        switch name {
+        case "click":
+            guard let x = number(args["x"]), let y = number(args["y"]),
+                  let point = cgPoint(pixelX: x, pixelY: y, displayIndex: Int(number(args["display"]) ?? 1)),
+                  let label = elementLabel(at: point) else { return nil }
+            guard let word = riskyControl(label) else { return nil }
+            return ("Press \(label.prefix(40))?", "\(word): \(label)")
+        case "type_text":
+            // Typing into a password field is never something to do unasked.
+            if focusedIsSecure() { return ("Type into this password field?", "secure field") }
+            return nil
+        case "key":
+            let combo = (args["combo"] as? String ?? args["key"] as? String ?? "").lowercased()
+            let risky = ["cmd+return", "cmd+enter", "cmd+delete", "cmd+backspace", "cmd+shift+delete"]
+            if risky.contains(where: { combo.contains($0) }) { return ("Press \(combo)?", combo) }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    /// Send, delete, buy: the words on the buttons that matter.
+    static func riskyControl(_ label: String) -> String? {
+        let lower = label.lowercased()
+        let words = ["send", "delete", "remove", "trash", "erase", "buy", "purchase", "pay", "order",
+                     "checkout", "subscribe", "publish", "post", "submit", "confirm", "transfer",
+                     "sign out", "log out", "shut down", "restart", "reset", "wipe", "empty"]
+        return words.first { lower.contains($0) }
+    }
+
+    /// The title of whatever sits under that screen point, via accessibility.
+    static func elementLabel(at point: CGPoint) -> String? {
+        guard AXIsProcessTrusted() else { return nil }
+        let system = AXUIElementCreateSystemWide()
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &element) == .success,
+              let element else { return nil }
+        for attr in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
+            var v: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, attr as CFString, &v) == .success,
+               let s = v as? String, !s.trimmingCharacters(in: .whitespaces).isEmpty {
+                return s
+            }
+        }
+        return nil
+    }
+
+    /// True when the keyboard focus is a password field.
+    static func focusedIsSecure() -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let element = focused else { return false }
+        var role: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element as! AXUIElement, kAXRoleAttribute as CFString, &role) == .success,
+              let r = role as? String else { return false }
+        return r == "AXSecureTextField"
     }
 
     private static func guardSettings(_ confirm: (String, String) -> Bool) -> Bool {

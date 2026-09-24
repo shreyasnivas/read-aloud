@@ -47,10 +47,31 @@ func log(_ s: String) {
     FileHandle.standardError.write(line.data(using: .utf8)!)
     let url = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs/Remote.log")
-    if let h = try? FileHandle(forWritingTo: url) {
-        h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()
-    } else {
-        try? line.write(to: url, atomically: true, encoding: .utf8)
+    LogFile.append(line, to: url)
+}
+
+/// One O_APPEND write per line, so the app, its MCP children and any test run
+/// can log at once without clobbering each other, and the file can't grow forever.
+enum LogFile {
+    static let maxBytes: UInt64 = 8 * 1024 * 1024
+    private static let lock = NSLock()
+
+    static func append(_ line: String, to url: URL) {
+        lock.lock(); defer { lock.unlock() }
+        rotateIfHuge(url)
+        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        _ = line.withCString { write(fd, $0, strlen($0)) }
+    }
+
+    /// Keeps one previous file, so a long-running install can't fill the disk.
+    private static func rotateIfHuge(_ url: URL) {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? UInt64,
+              size > maxBytes else { return }
+        let old = url.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: old)
+        try? FileManager.default.moveItem(at: url, to: old)
     }
 }
 
@@ -223,19 +244,30 @@ struct DisplayShot {
 enum Capture {
     static func allDisplays() async throws -> [DisplayShot] {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        var shots: [DisplayShot] = []
-        for d in content.displays {
+        // Every display at once. Serially, a second 4K screen used to add a few
+        // hundred milliseconds before the overlay could even appear.
+        let pairs: [(SCDisplay, NSScreen)] = content.displays.compactMap { d in
             guard let screen = NSScreen.screens.first(where: {
                 ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == d.displayID
-            }) else { continue }
-            let scale = screen.backingScaleFactor
-            let cfg = SCStreamConfiguration()
-            cfg.width = Int(CGFloat(d.width) * scale)
-            cfg.height = Int(CGFloat(d.height) * scale)
-            cfg.showsCursor = false
-            let filter = SCContentFilter(display: d, excludingWindows: [])
-            let img = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
-            shots.append(DisplayShot(screen: screen, image: img, scale: scale, index: 0))
+            }) else { return nil }
+            return (d, screen)
+        }
+        var shots: [DisplayShot] = try await withThrowingTaskGroup(of: DisplayShot.self) { group in
+            for (d, screen) in pairs {
+                group.addTask {
+                    let scale = screen.backingScaleFactor
+                    let cfg = SCStreamConfiguration()
+                    cfg.width = Int(CGFloat(d.width) * scale)
+                    cfg.height = Int(CGFloat(d.height) * scale)
+                    cfg.showsCursor = false
+                    let filter = SCContentFilter(display: d, excludingWindows: [])
+                    let img = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
+                    return DisplayShot(screen: screen, image: img, scale: scale, index: 0)
+                }
+            }
+            var out: [DisplayShot] = []
+            for try await s in group { out.append(s) }
+            return out
         }
         // Main display first, then left to right.
         shots.sort { a, b in
@@ -251,6 +283,34 @@ enum Capture {
 // MARK: - Image composition
 
 enum Compose {
+    /// Every display annotated with the marks, plus a close-up of the marked
+    /// area. Pure work on files: safe to run away from the main actor.
+    static func attachments(captured: [DisplayShot], strokesByShot: [[[CGPoint]]],
+                            cursor: CGPoint, dir: URL) -> ([Attachment], Bool) {
+        var attachments: [Attachment] = []
+        var marked = false
+        for (i, shot) in captured.enumerated() {
+            let strokes = i < strokesByShot.count ? strokesByShot[i] : []
+            let local = NSMouseInRect(cursor, shot.screen.frame, false)
+                ? CGPoint(x: cursor.x - shot.screen.frame.minX, y: cursor.y - shot.screen.frame.minY) : nil
+            guard let img = annotated(shot, strokes: strokes, cursor: local),
+                  let data = jpeg(img) else { continue }
+            let file = dir.appendingPathComponent("display-\(shot.index).jpg")
+            try? data.write(to: file)
+            let where_ = captured.count > 1 ? "Display \(shot.index) of \(captured.count)" : "The screen"
+            attachments.append(Attachment(label: where_ + (strokes.isEmpty ? "" : " (with the user's red marks)"), file: file))
+            if let r = markedRect(strokes, in: shot.screen.frame.size),
+               let crop = crop(img, pointRect: r, scale: shot.scale),
+               let cd = jpeg(crop) {
+                let cf = dir.appendingPathComponent("display-\(shot.index)-closeup.jpg")
+                try? cd.write(to: cf)
+                attachments.append(Attachment(label: "Close-up of the marked area on \(where_.lowercased())", file: cf))
+                marked = true
+            }
+        }
+        return (attachments, marked)
+    }
+
     /// The screenshot with the scribbles and the cursor drawn on, in native pixels.
     static func annotated(_ shot: DisplayShot, strokes: [[CGPoint]], cursor: CGPoint?) -> CGImage? {
         let w = shot.image.width, h = shot.image.height
@@ -391,7 +451,10 @@ enum Claude {
         p.standardOutput = out; p.standardError = err
         p.standardInput = FileHandle.nullDevice
         try p.run()
-        let timeout = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        // Its own process group, so a timeout takes the node children with it.
+        setpgid(p.processIdentifier, p.processIdentifier)
+        let pid = p.processIdentifier
+        let timeout = DispatchWorkItem { if p.isRunning { AgentKill.kill(pid: pid, grouped: true) } }
         DispatchQueue.global().asyncAfter(deadline: .now() + 120, execute: timeout)
         return try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global().async {
@@ -478,7 +541,7 @@ enum Threads {
         var ts = all().filter { $0.id != t.id }
         ts.insert(t, at: 0)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted]; enc.dateEncodingStrategy = .iso8601
-        try? enc.encode(Array(ts.prefix(Config.historyLimit))).write(to: file)
+        try? enc.encode(Array(ts.prefix(Config.historyLimit))).write(to: file, options: .atomic)
     }
 
     /// Turns in a thread, oldest first.
@@ -504,7 +567,7 @@ enum History {
 
     static func save(_ e: Entry, in dir: URL) {
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]; enc.dateEncodingStrategy = .iso8601
-        try? enc.encode(e).write(to: dir.appendingPathComponent("entry.json"))
+        try? enc.encode(e).write(to: dir.appendingPathComponent("entry.json"), options: .atomic)
         if let a = e.answer { try? a.write(to: dir.appendingPathComponent("answer.txt"), atomically: true, encoding: .utf8) }
     }
 
@@ -519,11 +582,29 @@ enum History {
         }.sorted { $0.0.date > $1.0.date }
     }
 
-    /// Keeps every request in the newest three threads; drops the rest.
+    /// Newest three threads, and within each of those the newest turns. A thread
+    /// kept alive by follow-ups used to keep every screenshot it ever took.
+    static let turnsPerThread = 40
+
     static func prune() {
         let keep = Set(Threads.all().prefix(Config.historyLimit).map(\.id))
-        for (e, d) in all() where !keep.contains(e.threadID ?? "") {
-            try? FileManager.default.removeItem(at: d)
+        var seen: [String: Int] = [:]
+        for (e, d) in all() {           // newest first
+            let tid = e.threadID ?? ""
+            guard keep.contains(tid) else { try? FileManager.default.removeItem(at: d); continue }
+            let n = (seen[tid] ?? 0) + 1
+            seen[tid] = n
+            if n > turnsPerThread { try? FileManager.default.removeItem(at: d); continue }
+            // Older turns keep their words; the images are what take the space.
+            if n > 8 { dropImages(in: d) }
+        }
+    }
+
+    /// Everything but entry.json and answer.txt.
+    static func dropImages(in dir: URL) {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for f in files where !["entry.json", "answer.txt"].contains(f.lastPathComponent) {
+            try? FileManager.default.removeItem(at: f)
         }
     }
 }
@@ -620,7 +701,36 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var forceContinue = false          // "Follow up" button
     var hideWork: DispatchWorkItem?
 
+    /// Another process of this app, by bundle id, excluding ourselves.
+    func otherRunningCopy() -> NSRunningApplication? {
+        guard let id = Bundle.main.bundleIdentifier else { return nil }
+        let me = ProcessInfo.processInfo.processIdentifier
+        return NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier == id && $0.processIdentifier != me && !$0.isTerminated
+        }
+    }
+
+    /// Quitting mid-turn must take the operator with it. Otherwise the child
+    /// keeps clicking and sending with nothing left to stop it.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let run = agentRun else { return .terminateNow }
+        log("quitting with a turn in flight; stopping it")
+        run.cancel()
+        agentRun = nil
+        speaker.stop()
+        return .terminateNow
+    }
+
     func applicationDidFinishLaunching(_ n: Notification) {
+        // One copy only. Two would both register ⌥⇧A and fight over the agent
+        // socket in Application Support, and the loser's approvals would either
+        // answer in the other app's window or silently deny.
+        if let other = otherRunningCopy() {
+            log("another copy is already running (pid \(other.processIdentifier)); handing over to it")
+            other.activate(options: [])
+            NSApp.terminate(nil)
+            return
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu(); menu.delegate = self
         statusItem.menu = menu
@@ -656,7 +766,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.stopSpeaking()
         })
         installBridge()
+        AgentToken.rotate()          // new secret each launch
         AgentSocketServer.shared.start()
+        // Resolve the claude binary now, not on the first request: it reads files
+        // and, once, runs `claude --help`, which used to block the first turn.
+        DispatchQueue.global(qos: .utility).async { _ = Agent.operatorBinary() }
         NSApp.mainMenu = buildMainMenu()
         log("started; hotkey \(Config.hotKeyLabel); " + Permission.allCases.map { "\($0.rawValue)=\($0.granted ? "yes" : "NO")" }.joined(separator: ", "))
         // Launched by hand (Finder, Spotlight, Dock): show the window. At login: stay in the menu bar.
@@ -838,8 +952,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Continue the latest thread if it was used recently (or "Follow up" was pressed).
             let latest = Threads.all().first
             model.threadTitle = latest?.title ?? ""
-            model.hasThread = latest != nil
-            model.continuing = latest != nil && (forceContinue || Date().timeIntervalSince(latest!.lastUsed) < Threads.continueWindow)
+            // A thread you took over in its pane is yours; a spoken request starts a new one.
+            let takenOver = latest.map { Ownership.isTakenOver($0.id) } ?? false
+            model.hasThread = latest != nil && !takenOver
+            model.continuing = latest != nil && !takenOver
+                && (forceContinue || Date().timeIntervalSince(latest!.lastUsed) < Threads.continueWindow)
             forceContinue = false
             do { try transcriber.start(); listening = true }
             catch { listening = false; log("mic/transcriber failed to start: \(error.localizedDescription)") }
@@ -917,14 +1034,23 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.statusLine = "Working…"
         showPill()
         let token = requestToken
+        // Annotating and encoding the screenshots doesn't need the words, and
+        // finalizing on-device speech can take up to two and a half seconds.
+        // Do both at once, off the main actor, so the child starts sooner.
+        let (id, dir) = History.newDir()
+        let cursorNow = cursor
+        let built = Task.detached(priority: .userInitiated) {
+            Compose.attachments(captured: captured, strokesByShot: strokesByShot, cursor: cursorNow, dir: dir)
+        }
         Task {
             let transcript = listening ? await transcriber.stop() : ""
             listening = false
-            await runAgent(transcript: transcript, strokesByShot: strokesByShot, captured: captured, token: token)
+            await runAgent(transcript: transcript, captured: captured, token: token, id: id, dir: dir, built: built)
         }
     }
 
-    func runAgent(transcript: String, strokesByShot: [[[CGPoint]]], captured: [DisplayShot], token: Int) async {
+    func runAgent(transcript: String, captured: [DisplayShot], token: Int,
+                  id: String, dir: URL, built: Task<([Attachment], Bool), Never>) async {
         state = .thinking
         model.question = transcript
         model.answer = ""
@@ -932,37 +1058,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.statusLine = "Working…"
         showPill()
         let started = Date()
-        let (id, dir) = History.newDir()
 
-        // Build the attachments: every display annotated, plus a close-up of the marks.
-        var attachments: [Attachment] = []
-        var marked = false
-        for (i, shot) in captured.enumerated() {
-            let strokes = i < strokesByShot.count ? strokesByShot[i] : []
-            let local = NSMouseInRect(cursor, shot.screen.frame, false)
-                ? CGPoint(x: cursor.x - shot.screen.frame.minX, y: cursor.y - shot.screen.frame.minY) : nil
-            guard let img = Compose.annotated(shot, strokes: strokes, cursor: local),
-                  let data = Compose.jpeg(img) else { continue }
-            let file = dir.appendingPathComponent("display-\(shot.index).jpg")
-            try? data.write(to: file)
-            let where_ = captured.count > 1 ? "Display \(shot.index) of \(captured.count)" : "The screen"
-            attachments.append(Attachment(label: where_ + (strokes.isEmpty ? "" : " (with the user's red marks)"), file: file))
-            if let r = Compose.markedRect(strokes, in: shot.screen.frame.size),
-               let crop = Compose.crop(img, pointRect: r, scale: shot.scale),
-               let cd = Compose.jpeg(crop) {
-                let cf = dir.appendingPathComponent("display-\(shot.index)-closeup.jpg")
-                try? cd.write(to: cf)
-                attachments.append(Attachment(label: "Close-up of the marked area on \(where_.lowercased())", file: cf))
-                marked = true
-            }
-        }
         shots = []   // release the full-resolution captures
+        let (attachments, marked) = await built.value
         if token != requestToken { return }
 
         // The thread: continue the latest one, or start a new Claude Code session.
         var thread: ChatThread
         var isNew: Bool
-        if model.continuing, let latest = Threads.all().first {
+        if model.continuing, let latest = Threads.all().first, !Ownership.isTakenOver(latest.id) {
             thread = latest; isNew = false
         } else {
             thread = ChatThread(id: UUID().uuidString.lowercased(), title: Threads.title(for: transcript, frontApp: frontApp),
@@ -971,6 +1075,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         thread.lastUsed = started
         Threads.upsert(thread)
+        // The thread gets a cmux pane of its own, in the background, so it can be
+        // watched without taking the screen. Off the main actor: cmux is a process.
+        let paneThread = thread
+        DispatchQueue.global(qos: .utility).async { ThreadPane.ensure(paneThread); Ownership.prune() }
         cardThreadID = thread.id
         model.threadTitle = thread.title
         model.earlier = Threads.turns(thread.id).map { ($0.transcript, $0.answer ?? $0.error ?? "") }
@@ -1101,6 +1209,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func askApproval(question: String, detail: String) async -> Bool {
         log("approve ask: \(question) \(detail.prefix(160))")
         model.approvalQuestion = question
+        // Show what is actually about to run, not only the spoken summary.
+        model.approvalDetail = detail.replacingOccurrences(of: "\n", with: " ").prefix(220).description
         model.statusLine = question
         model.phase = .approving
         state = .approving
@@ -1112,14 +1222,18 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let work = DispatchWorkItem { [weak self] in self?.finishApproval(false, reason: "timeout") }
             approvalTimeout = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
-            returnHotKey = HotKey(keyCode: UInt32(kVK_Return), modifiers: 0) { [weak self] in
-                MainActor.assumeIsolated { self?.finishApproval(true, reason: "return") }
+            // ⌥⇧Y, not a bare Return: a global unscoped Return meant that any
+            // Enter pressed anywhere on the Mac, in Slack or a terminal, silently
+            // approved whatever Remote was asking about.
+            returnHotKey = HotKey(keyCode: UInt32(kVK_ANSI_Y), modifiers: UInt32(optionKey | shiftKey)) { [weak self] in
+                MainActor.assumeIsolated { self?.finishApproval(true, reason: "hotkey") }
             }
         }
     }
 
     func finishApproval(_ allow: Bool, reason: String) {
         guard let cont = approvalWait else { return }
+        model.approvalDetail = ""
         approvalWait = nil
         approvalTimeout?.cancel()
         approvalTimeout = nil
@@ -1183,6 +1297,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 // MARK: - Self-test (no UI): capture, mark the centre, ask, print, speak.
 
 func selfTest(_ question: String) async {
+    var runDir: URL?          // so a failure cleans up its screenshots too
     do {
         let shots = try await Capture.allDisplays()
         print("displays: \(shots.map { "\($0.index): \($0.image.width)x\($0.image.height)" })")
@@ -1193,6 +1308,7 @@ func selfTest(_ question: String) async {
             return CGPoint(x: c.x + 220 * cos(a), y: c.y + 140 * sin(a))
         }
         let (_, dir) = History.newDir()
+        runDir = dir
         guard let img = Compose.annotated(s, strokes: [circle], cursor: c), let d = Compose.jpeg(img),
               let r = Compose.markedRect([circle], in: s.screen.frame.size),
               let crop = Compose.crop(img, pointRect: r, scale: s.scale), let cd = Compose.jpeg(crop) else { print("compose failed"); exit(1) }
@@ -1216,7 +1332,11 @@ func selfTest(_ question: String) async {
         print("session: \(sid)")
         try? FileManager.default.removeItem(at: dir)
         exit(0)
-    } catch { print("selftest failed: \(error)"); exit(1) }
+    } catch {
+        print("selftest failed: \(error)")
+        if let d = runDir { try? FileManager.default.removeItem(at: d) }
+        exit(1)
+    }
 }
 
 // MARK: - Main
@@ -1247,6 +1367,8 @@ if args.contains("--mcp-server") {
     let q = i + 1 < args.count && !args[i + 1].hasPrefix("--") ? args[i + 1] : "Open my Downloads folder"
     Task { await Agent.selfTest(request: q) }
     RunLoop.main.run()
+} else if let i = args.firstIndex(of: "--follow"), i + 1 < args.count {
+    Follower.run(threadID: args[i + 1])
 } else if let i = args.firstIndex(of: "--transcribe-file"), i + 1 < args.count {
     let f = args[i + 1]
     Task { await transcribeFileTest(f) }
