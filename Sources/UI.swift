@@ -291,7 +291,7 @@ struct AnswerCard: View {
         case .speaking: return "Reading aloud"
         case .stopped: return "Stopped"
         case .error: return "Something went wrong"
-        default: return "Read Aloud"
+        default: return "Remote"
         }
     }
     private var icon: String {
@@ -447,7 +447,7 @@ struct SettingsView: View {
                 HStack(spacing: 14) {
                     Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 52, height: 52)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Read Aloud").font(.title3.weight(.semibold))
+                        Text("Remote").font(.title3.weight(.semibold))
                         HStack(spacing: 4) {
                             Text("Press"); Keycap(key: Config.hotKeyLabel).foregroundStyle(.primary)
                             Text("anywhere, point, and ask.")
@@ -476,7 +476,7 @@ struct SettingsView: View {
                 }
                 if !Permission.screen.granted {
                     HStack {
-                        Text("After switching Read Aloud on in System Settings, reopen the app so macOS applies it.")
+                        Text("After switching Remote on in System Settings, reopen the app so macOS applies it.")
                             .font(.caption).foregroundStyle(.secondary)
                         Spacer()
                         Button("Quit & Reopen") { Relaunch.now() }
@@ -508,7 +508,7 @@ struct SettingsView: View {
                 HStack {
                     Text("Voice")
                     Spacer()
-                    Button("Test") { speaker.speak(text: "This is how Read Aloud sounds.") }
+                    Button("Test") { speaker.speak(text: "This is how Remote sounds.") }
                     Button("Change Voice…") {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?SpokenContent")!)
                     }
@@ -521,7 +521,7 @@ struct SettingsView: View {
             } header: {
                 Text("General")
             } footer: {
-                Text("Read Aloud speaks with your Mac's System Voice. To use a Siri voice, pick one under Spoken Content.")
+                Text("Remote speaks with your Mac's System Voice. To use a Siri voice, pick one under Spoken Content.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -542,7 +542,7 @@ enum Relaunch {
     }
 }
 
-/// While the window is open Read Aloud is a normal app (Dock icon, ⌘Q, ⌘,);
+/// While the window is open Remote is a normal app (Dock icon, ⌘Q, ⌘,);
 /// when it's closed it lives in the menu bar only.
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     convenience init(speaker: Speaker) {
@@ -553,7 +553,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 500, height: 700),
                          styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         w.contentView = host
-        w.title = "Read Aloud"
+        w.title = "Remote"
         w.titlebarAppearsTransparent = true
         w.isReleasedWhenClosed = false
         self.init(window: w)

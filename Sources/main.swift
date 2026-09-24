@@ -1,4 +1,4 @@
-// Read Aloud: press a hotkey, point at something on screen, ask out loud,
+// Remote: press a hotkey, point at something on screen, ask out loud,
 // hear Claude's answer.
 //
 // Flow: hotkey -> capture every display -> frozen overlay you can scribble on,
@@ -6,7 +6,7 @@
 // Claude with the screenshots and transcript -> speak the answer with the
 // system voice.
 //
-// Read Aloud is self-contained and is the system of record: every request is
+// Remote is self-contained and is the system of record: every request is
 // saved in its own history (the newest three are kept).
 
 import AppKit
@@ -20,7 +20,7 @@ import SwiftUI
 // MARK: - Config
 
 enum Config {
-    static let appName = "Read Aloud"
+    static let appName = "Remote"
     static let historyLimit = 3
     // Hotkey: Option+Shift+A.
     static let hotKeyCode = UInt32(kVK_ANSI_A)
@@ -46,7 +46,7 @@ func log(_ s: String) {
     let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(s)\n"
     FileHandle.standardError.write(line.data(using: .utf8)!)
     let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/ReadAloud.log")
+        .appendingPathComponent("Library/Logs/Remote.log")
     if let h = try? FileHandle(forWritingTo: url) {
         h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()
     } else {
@@ -91,7 +91,7 @@ final class HotKey {
 }
 
 /// Makes Esc stop any speech, system-wide, but only while something is being
-/// spoken: Read Aloud's own answers or a terminal `/readback` (via its pid file).
+/// spoken: Remote's own answers or a terminal `/readback` (via its pid file).
 /// Holding Esc only while speaking means Esc works normally the rest of the time.
 @MainActor
 final class EscapeToStop {
@@ -151,15 +151,15 @@ final class Transcriber {
 
     static func requestPermissions() async -> String? {
         let speech = await withCheckedContinuation { c in SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) } }
-        guard speech == .authorized else { return "Speech Recognition permission is off for Read Aloud." }
-        guard await AVCaptureDevice.requestAccess(for: .audio) else { return "Microphone permission is off for Read Aloud." }
+        guard speech == .authorized else { return "Speech Recognition permission is off for Remote." }
+        guard await AVCaptureDevice.requestAccess(for: .audio) else { return "Microphone permission is off for Remote." }
         return nil
     }
 
     func start() throws {
         cancel()
         guard let recognizer, recognizer.isAvailable else {
-            throw NSError(domain: "ReadAloud", code: 10, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer unavailable"])
+            throw NSError(domain: "Remote", code: 10, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer unavailable"])
         }
         text = ""
         let req = SFSpeechAudioBufferRecognitionRequest()
@@ -315,7 +315,7 @@ struct Attachment { let label: String; let file: URL }
 
 enum Claude {
     static let system = """
-    You are Read Aloud, a voice assistant on the user's Mac. The user pressed a hotkey, \
+    You are Remote, a voice assistant on the user's Mac. The user pressed a hotkey, \
     maybe scribbled on their screen, and asked a question out loud. You get screenshots \
     of every display, a transcript of what they said, and the app that was in front.
 
@@ -361,11 +361,11 @@ enum Claude {
 
     static func viaClaudeCode(transcript: String, frontApp: String, attachments: [Attachment], session: Session) async throws -> String {
         guard let bin = claudeBinary else {
-            throw NSError(domain: "ReadAloud", code: 2, userInfo: [NSLocalizedDescriptionKey: "Claude Code (the claude command) isn't installed"])
+            throw NSError(domain: "Remote", code: 2, userInfo: [NSLocalizedDescriptionKey: "Claude Code (the claude command) isn't installed"])
         }
         let files = attachments.map { "- \($0.label): \($0.file.path)" }.joined(separator: "\n")
         let prompt = """
-        New question from Read Aloud. Read each of these image files with the Read tool before answering:
+        New question from Remote. Read each of these image files with the Read tool before answering:
         \(files)
 
         \(userText(transcript: transcript, frontApp: frontApp, attachments: attachments))
@@ -402,7 +402,7 @@ enum Claude {
                 if p.terminationStatus == 0 && !text.isEmpty { cont.resume(returning: text) }
                 else {
                     let e = String(data: errData, encoding: .utf8) ?? ""
-                    cont.resume(throwing: NSError(domain: "ReadAloud", code: 3, userInfo: [NSLocalizedDescriptionKey: "claude -p failed (\(p.terminationStatus)): \(e.prefix(300))"]))
+                    cont.resume(throwing: NSError(domain: "Remote", code: 3, userInfo: [NSLocalizedDescriptionKey: "claude -p failed (\(p.terminationStatus)): \(e.prefix(300))"]))
                 }
             }
         }
@@ -429,7 +429,7 @@ final class Speaker {
     }
 
     func speak(text: String) {
-        let f = FileManager.default.temporaryDirectory.appendingPathComponent("readaloud-say.txt")
+        let f = FileManager.default.temporaryDirectory.appendingPathComponent("remote-say.txt")
         try? text.write(to: f, atomically: true, encoding: .utf8)
         speak(file: f)
     }
@@ -672,13 +672,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let main = NSMenu()
         let appItem = NSMenuItem(); main.addItem(appItem)
         let m = NSMenu()
-        m.addItem(withTitle: "About Read Aloud", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        m.addItem(withTitle: "About Remote", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         m.addItem(.separator())
         m.addItem(withTitle: "Settings…", action: #selector(menuSettings), keyEquivalent: ",").target = self
         m.addItem(.separator())
-        m.addItem(withTitle: "Hide Read Aloud", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        m.addItem(withTitle: "Hide Remote", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         m.addItem(.separator())
-        m.addItem(withTitle: "Quit Read Aloud", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        m.addItem(withTitle: "Quit Remote", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = m
         let winItem = NSMenuItem(); main.addItem(winItem)
         let w = NSMenu(title: "Window")
@@ -732,7 +732,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle: "Show History in Finder", action: #selector(menuShowHistory), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Settings…", action: #selector(menuSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit Read Aloud", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(withTitle: "Quit Remote", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     }
 
     @objc func menuCapture() { hotKeyPressed() }
@@ -770,7 +770,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cmux = "/Applications/cmux.app/Contents/Resources/bin/cmux"
         if FileManager.default.isExecutableFile(atPath: cmux) {
             let p = Process(); p.executableURL = URL(fileURLWithPath: cmux)
-            p.arguments = ["new-workspace", "--name", "Read Aloud", "--cwd", dir, "--command", "claude --resume \(id)"]
+            p.arguments = ["new-workspace", "--name", "Remote", "--cwd", dir, "--command", "claude --resume \(id)"]
             if (try? p.run()) != nil {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/cmux.app"))
                 return
@@ -829,7 +829,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } catch {
                 log("capture failed: \(error)")
                 state = .idle
-                fail("Read Aloud needs Screen Recording permission. Allow it in Settings, then reopen the app.")
+                fail("Remote needs Screen Recording permission. Allow it in Settings, then reopen the app.")
                 settings.present()
                 return
             }
@@ -1031,7 +1031,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// One turn. If resuming the Claude session fails, start it fresh under the same id.
     private func act(thread: ChatThread, isNew: Bool, attachments: [Attachment], holder: Agent.Run, dir: URL) async throws -> String {
-        let name = "Read Aloud · \(thread.title)"
+        let name = "Remote · \(thread.title)"
         do {
             return try await Agent.run(transcript: model.question, frontApp: frontApp, attachments: attachments,
                                        session: .init(id: thread.id, isNew: isNew, name: name),
@@ -1204,7 +1204,7 @@ func selfTest(_ question: String) async {
         let (answer, backend) = try await Claude.ask(transcript: question, frontApp: "selftest",
             attachments: [Attachment(label: "The screen (with the user's red marks)", file: f1),
                           Attachment(label: "Close-up of the marked area on the screen", file: f2)],
-            session: .init(id: sid, isNew: true, name: "Read Aloud self-test"))
+            session: .init(id: sid, isNew: true, name: "Remote self-test"))
         print("backend: \(backend), \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
         print("answer 1: \(answer)")
         // Turn two in the same thread, no new marks: it must remember turn one.

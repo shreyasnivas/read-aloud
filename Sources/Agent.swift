@@ -12,7 +12,7 @@ struct AgentStopped: Error {}
 enum Agent {
     /// Section 4 of the build contract, plus how to read a marked screenshot.
     static let systemPrompt = """
-    You are Read Aloud, a voice operator on the user's Mac. They spoke a request, \
+    You are Remote, a voice operator on the user's Mac. They spoke a request, \
     maybe scribbled on the screen to point at something. Decide: is this a question \
     or a task?
 
@@ -51,7 +51,7 @@ enum Agent {
     /// Bash command comes through `approve`, which allows the contract's list
     /// in code and asks for anything else. No prompt either way for the list.
     static let allowedToolArgs = [
-        "Read", "Glob", "Grep", "mcp__readaloud__*",
+        "Read", "Glob", "Grep", "mcp__remote__*",
     ]
 
     final class Run: @unchecked Sendable {
@@ -173,7 +173,7 @@ enum Agent {
                     threadDir: URL, approve: String, trace: URL?, run: Run,
                     onTool: @escaping (String, String) -> Void) async throws -> String {
         guard let bin = operatorBinary() else {
-            throw NSError(domain: "ReadAloud", code: 2, userInfo: [NSLocalizedDescriptionKey: "Claude Code is installed, but this copy has no --permission-prompt-tool, which the operator needs"])
+            throw NSError(domain: "Remote", code: 2, userInfo: [NSLocalizedDescriptionKey: "Claude Code is installed, but this copy has no --permission-prompt-tool, which the operator needs"])
         }
         let mcpURL = (approve == "deny" ? threadDir : Config.supportDir).appendingPathComponent("mcp.json")
         try writeMCP(approve: approve, threadDir: threadDir, trace: trace, to: mcpURL)
@@ -231,7 +231,7 @@ enum Agent {
         let sid = UUID().uuidString.lowercased()
         do {
             let text = try await run(transcript: request, frontApp: "selftest", attachments: attachments,
-                                     session: .init(id: sid, isNew: true, name: "Read Aloud self-test"),
+                                     session: .init(id: sid, isNew: true, name: "Remote self-test"),
                                      threadDir: dir, approve: "deny", trace: trace, run: holder) { name, input in
                 print("tool: \(name) \(input)")
                 fflush(stdout)
@@ -259,7 +259,7 @@ enum Agent {
         if let trace { mcpArgs.append(contentsOf: ["--trace", trace.path]) }
         let cfg: [String: Any] = [
             "mcpServers": [
-                "readaloud": [
+                "remote": [
                     "command": executablePath(),
                     "args": mcpArgs,
                 ],
@@ -273,7 +273,7 @@ enum Agent {
         let files = attachments.map { "- \($0.label): \($0.file.path)" }.joined(separator: "\n")
         let said = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         return """
-        The user just spoke to Read Aloud.
+        The user just spoke to Remote.
         \(files.isEmpty ? "No images were captured." : "Read each of these image files with the Read tool before you answer:\n\(files)")
 
         App in front: \(frontApp)
@@ -290,7 +290,7 @@ enum Agent {
                     "--output-format", "stream-json", "--verbose",
                     "--append-system-prompt", systemPrompt,
                     "--mcp-config", mcp.path,
-                    "--permission-prompt-tool", "mcp__readaloud__approve"]
+                    "--permission-prompt-tool", "mcp__remote__approve"]
         // Newer Claude records the first system prompt and ignores later edits.
         // Older builds (the Homebrew 2.1.114 one) don't have the switch at all.
         if help.contains("--system-prompt-snapshot") { args += ["--system-prompt-snapshot", "off"] }
@@ -351,21 +351,21 @@ enum Agent {
         errGroup.wait()
         if let reason = run.stopReason {
             if reason.hasPrefix("timed") {
-                throw NSError(domain: "ReadAloud", code: 6, userInfo: [NSLocalizedDescriptionKey: reason])
+                throw NSError(domain: "Remote", code: 6, userInfo: [NSLocalizedDescriptionKey: reason])
             }
             throw AgentStopped()
         }
         let errText = String(data: errData.suffix(4000), encoding: .utf8) ?? ""
         if failed {
-            throw NSError(domain: "ReadAloud", code: 3, userInfo: [NSLocalizedDescriptionKey: "claude failed: \((final ?? errText).prefix(400))"])
+            throw NSError(domain: "Remote", code: 3, userInfo: [NSLocalizedDescriptionKey: "claude failed: \((final ?? errText).prefix(400))"])
         }
         if let final, !final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return final.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if p.terminationStatus != 0 {
-            throw NSError(domain: "ReadAloud", code: 3, userInfo: [NSLocalizedDescriptionKey: "claude -p failed (\(p.terminationStatus)): \(errText.prefix(400))"])
+            throw NSError(domain: "Remote", code: 3, userInfo: [NSLocalizedDescriptionKey: "claude -p failed (\(p.terminationStatus)): \(errText.prefix(400))"])
         }
-        throw NSError(domain: "ReadAloud", code: 3, userInfo: [NSLocalizedDescriptionKey: "claude returned no result. \(recent.last?.prefix(300) ?? "")"])
+        throw NSError(domain: "Remote", code: 3, userInfo: [NSLocalizedDescriptionKey: "claude returned no result. \(recent.last?.prefix(300) ?? "")"])
     }
 
     private static func consume(_ line: String, final: inout String?, failed: inout Bool, onTool: (String, String) -> Void) {

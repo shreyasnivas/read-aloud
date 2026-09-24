@@ -1,4 +1,4 @@
-# Read Aloud
+# Remote
 
 A macOS menu bar app. Press ⌥⇧A to freeze every display under an overlay,
 scribble on it to point at something, ask out loud, and hear Claude's answer.
@@ -30,19 +30,19 @@ ApplicationServices).
 ```bash
 ./build.sh                  # build, install to /Applications, relaunch
 ./build.sh --no-install     # build only, into build/
-"build/Read Aloud.app/Contents/MacOS/ReadAloud" --selftest "What's in the red circle?"
+"build/Remote.app/Contents/MacOS/Remote" --selftest "What's in the red circle?"
                             # headless question path: capture, fake mark, two-turn thread
-"build/Read Aloud.app/Contents/MacOS/ReadAloud" --selftest-agent "Open my Downloads folder"
+"build/Remote.app/Contents/MacOS/Remote" --selftest-agent "Open my Downloads folder"
                             # headless operator: approve auto-denies, prints tool calls
-"build/Read Aloud.app/Contents/MacOS/ReadAloud" --mcp-selftest
+"build/Remote.app/Contents/MacOS/Remote" --mcp-selftest
                             # MCP server lists tools, calls spotlight and say_progress
-open -n "/Applications/Read Aloud.app" --args --transcribe-file x.aiff   # writes x.aiff.txt
-"…/MacOS/ReadAloud" --settings   # open Settings at launch (debugging layout)
+open -n "/Applications/Remote.app" --args --transcribe-file x.aiff   # writes x.aiff.txt
+"…/MacOS/Remote" --settings   # open Settings at launch (debugging layout)
 ```
 
-Log: `~/Library/Logs/ReadAloud.log`. The first line at each launch records the
+Log: `~/Library/Logs/Remote.log`. The first line at each launch records the
 state of Screen Recording, Microphone, Speech Recognition, and Accessibility. Crash reports:
-`~/Library/Logs/DiagnosticReports/ReadAloud-*.ips`. Delete `build/Read Aloud.app`
+`~/Library/Logs/DiagnosticReports/Remote-*.ips`. Delete `build/Remote.app`
 after installing so only one copy with the bundle id exists.
 
 ## How it works
@@ -62,7 +62,7 @@ after installing so only one copy with the bundle id exists.
    accessibility tree. System Settings asks once. Anything that
    sends, deletes, buys, or is outside that allowlist asks first; Esc or a
    spoken "stop" kills the process group. A question is still just answered.
-   cwd is `~/Library/Application Support/Read Aloud/`. Timeout is 600 seconds.
+   cwd is `~/Library/Application Support/Remote/`. Timeout is 600 seconds.
 4. The final line is spoken with `/usr/bin/say` (the system voice), and the
    answer card shows the thread. Progress lines before that are spoken too;
    other assistant text is not.
@@ -71,7 +71,7 @@ after installing so only one copy with the bundle id exists.
 --name …` and follow-ups use `--resume <uuid>`. ⌥⇧A within 15 minutes continues
 the latest thread; Tab in the overlay toggles. "Open in Terminal" runs
 `claude --resume <id>` in cmux (falls back to Terminal.app). `threads.json` and
-`history/<timestamp>/entry.json` are Read Aloud's own record. Only the newest 3
+`history/<timestamp>/entry.json` are Remote's own record. Only the newest 3
 threads are kept (`Config.historyLimit`).
 
 **Esc** stops any speech system-wide, but only while something is speaking or
@@ -87,6 +87,11 @@ it afterwards. While a permission question is up, Esc means no. It also stops a
   the child env. Don't add an API-key path back.
 - **Set `READBACK_NESTED=1` for every `claude` child.** Stop hooks that speak
   recaps check it and skip the helper session instead of talking over the answer.
+- **The bundle id stays `dev.readaloud.ReadAloud`.** The app is called Remote; the
+  identifier is not, on purpose. TCC keys the Screen Recording, Microphone, Speech
+  and Accessibility grants to the bundle id, so changing it means granting all four
+  again, with a relaunch for Screen Recording. Rename it only as a deliberate step.
+
 - **Sign with a stable identity.** `build.sh` signs with a local self-signed
   certificate (`tools/make-signing-cert.sh`; name from `SIGN_IDENTITY` or an
   untracked `.signing-identity` file). The designated requirement is the bundle id plus

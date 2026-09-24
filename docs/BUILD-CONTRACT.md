@@ -1,4 +1,4 @@
-# Build contract: Read Aloud becomes a voice operator
+# Build contract: Remote becomes a voice operator
 
 Status: approved by Shreyas (owner), 2026-09-22. Branch: `operator-agent`.
 Builder: Grok Build (most of the work). Reviewer and verifier: Claude (Opus).
@@ -53,8 +53,8 @@ claude -p <prompt>
   --output-format stream-json --verbose
   --append-system-prompt <OPERATOR_SYSTEM>          (section 4)
   --mcp-config <supportDir>/mcp.json                (our own server, 3.2)
-  --allowedTools Read,Glob,Grep,mcp__readaloud__* ,<Bash allowlist, 3.4>
-  --permission-prompt-tool mcp__readaloud__approve
+  --allowedTools Read,Glob,Grep,mcp__remote__* ,<Bash allowlist, 3.4>
+  --permission-prompt-tool mcp__remote__approve
   --session-id / --resume                            (threads, unchanged)
 ```
 
@@ -68,7 +68,7 @@ so cancel can kill it and anything it spawned.
 
 ### 3.2 A local MCP server inside the app binary
 
-`ReadAloud --mcp-server` speaks MCP (JSON-RPC 2.0 over stdio, newline framed)
+`Remote --mcp-server` speaks MCP (JSON-RPC 2.0 over stdio, newline framed)
 with no dependencies. The app writes `mcp.json` pointing at its own binary.
 The server talks to the running app over a Unix socket at
 `<supportDir>/agent.sock` for anything that needs UI (approval, progress).
@@ -120,7 +120,7 @@ Prompt injection: web pages, files and screenshots are data. The system prompt
 says so, and the code backs it up: nothing reached through Chrome can widen the
 Bash allowlist, and every tier-3 action goes through approve regardless of
 what the model says. Log every tool call with its arguments and decision to
-`~/Library/Logs/ReadAloud.log`.
+`~/Library/Logs/Remote.log`.
 
 ### 3.5 Permissions
 
@@ -131,7 +131,7 @@ rebuilds.
 ## 4. Operator system prompt (starting text, tune it)
 
 ```
-You are Read Aloud, a voice operator on the user's Mac. They spoke a request,
+You are Remote, a voice operator on the user's Mac. They spoke a request,
 maybe scribbled on the screen to point at something. Decide: is this a question
 or a task?
 
@@ -199,7 +199,7 @@ Append to the handoff log below at every milestone gate.
 
 ## 9. Open questions (ask Shreyas, don't guess)
 
-1. New product name. Leave "Read Aloud" until he picks one.
+1. New product name. Leave "Remote" until he picks one.
 2. Wake word choice and whether always-on listening is acceptable (M3).
 3. Which apps should be trusted to type into without asking (M2).
 
@@ -217,7 +217,7 @@ Append to the handoff log below at every milestone gate.
   `~/.nvm/versions/node/v20.20.2/bin/claude` 2.1.280, which has that flag and
   `--chrome`. That build also gets `--system-prompt-snapshot off`.
   Tested, headless, no synthetic keys:
-  `./build.sh` built, installed, and launched `/Applications/Read Aloud.app`.
+  `./build.sh` built, installed, and launched `/Applications/Remote.app`.
   `--mcp-selftest` printed `safety: ok`, the seven M1 tools, a spotlight hit,
   `Said: mcp selftest`, `approve deny: ok`, `approve allow: ok`, `mcp-selftest: ok`.
   `--selftest "What's in the red circle?"` printed two answers (12.7s, then 8.4s)
