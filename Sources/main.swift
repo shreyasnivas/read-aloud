@@ -11,6 +11,7 @@
 
 import AppKit
 import AVFoundation
+import CoreAudio
 import Carbon.HIToolbox
 import ScreenCaptureKit
 import ServiceManagement
@@ -27,6 +28,8 @@ enum Config {
     static let hotKeyModifiers = UInt32(optionKey | shiftKey)
     static let hotKeyLabel = "⌥⇧A"
     static let model = "claude-opus-5"
+    /// Settings: "operator" acts on the Mac, "answer" only replies.
+    static var answerOnly: Bool { UserDefaults.standard.string(forKey: "mode") == "answer" }
     static let maxImageEdge: CGFloat = 1568
 
     static var supportDir: URL {
@@ -177,12 +180,35 @@ final class Transcriber {
         return nil
     }
 
+    /// Loudest sample seen since recording started, so the HUD can say when the
+    /// microphone is hearing nothing at all.
+    private(set) var peak: Float = 0
+    var onLevel: ((Float) -> Void)?
+
+    static func defaultInputName() -> String {
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr
+        else { return "unknown" }
+        var name: CFString = "" as CFString
+        var nsize = UInt32(MemoryLayout<CFString>.size)
+        var naddr = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName,
+                                               mScope: kAudioObjectPropertyScopeGlobal,
+                                               mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(id, &naddr, 0, nil, &nsize, &name) == noErr else { return "unknown" }
+        return name as String
+    }
+
     func start() throws {
         cancel()
         guard let recognizer, recognizer.isAvailable else {
             throw NSError(domain: "Remote", code: 10, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer unavailable"])
         }
         text = ""
+        peak = 0
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
         req.addsPunctuation = true
@@ -198,12 +224,28 @@ final class Transcriber {
                 if error != nil || result?.isFinal == true { self.finish() }
             }
         }
+        // Reset first: the engine caches the input device, so a microphone
+        // plugged in or switched since the last run can leave a dead node.
+        engine.stop()
+        engine.reset()
         let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
+        let format = input.inputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw NSError(domain: "Remote", code: 11, userInfo: [NSLocalizedDescriptionKey:
+                "The microphone gave no usable input format (device: \(Transcriber.defaultInputName()))"])
+        }
         input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buf, _ in req.append(buf) }
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
+            req.append(buf)
+            guard let self, let ch = buf.floatChannelData?[0] else { return }
+            var loudest: Float = 0
+            for i in 0..<Int(buf.frameLength) { loudest = max(loudest, abs(ch[i])) }
+            if loudest > self.peak { self.peak = loudest }
+            self.onLevel?(loudest)
+        }
         engine.prepare()
         try engine.start()
+        log("listening on \(Transcriber.defaultInputName()) at \(Int(format.sampleRate))Hz, \(format.channelCount)ch")
     }
 
     /// Stops recording and returns the final transcript (or the latest partial
@@ -516,6 +558,45 @@ struct Entry: Codable {
     var secondsToAnswer: Double?
     var threadID: String?
     var stopped: Bool?
+    /// What the agent did this turn, in order, for the history view.
+    var actions: [String]?
+}
+
+/// Tool calls arrive on a background queue while the turn streams.
+final class ActionLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String] = []
+    func add(_ s: String) { lock.lock(); if items.count < 60 { items.append(s) }; lock.unlock() }
+    var all: [String] { lock.lock(); defer { lock.unlock() }; return items }
+}
+
+extension Entry {
+    /// "Opened ~/Downloads", not "mcp__remote__open_target {json}".
+    static func describe(tool: String, input: String) -> String {
+        let short = tool.replacingOccurrences(of: "mcp__remote__", with: "")
+        func firstValue(_ keys: [String]) -> String? {
+            guard let data = input.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            for k in keys { if let v = obj[k] as? String, !v.isEmpty { return v } }
+            return nil
+        }
+        switch short {
+        case "open_target": return "Opened \(firstValue(["target"]) ?? "something")"
+        case "spotlight": return "Searched for \(firstValue(["query", "name"]) ?? "files")"
+        case "run_applescript": return "Ran a script in \(firstValue(["app"]) ?? "an app")"
+        case "cmux_handoff": return "Handed off to cmux"
+        case "screenshot": return "Looked at the screen"
+        case "say_progress": return "Said: \(firstValue(["text"]) ?? "…")"
+        case "click": return "Clicked"
+        case "type_text": return "Typed"
+        case "key": return "Pressed \(firstValue(["combo", "key"]) ?? "a key")"
+        case "scroll": return "Scrolled"
+        case "ax_tree": return "Read the window"
+        case "Bash": return "Ran: \(firstValue(["command"])?.prefix(60) ?? "a command")"
+        case "Read": return "Read a file"
+        default: return short
+        }
+    }
 }
 
 /// A conversation thread = one Claude Code session.
@@ -678,7 +759,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let speaker = Speaker()
     let model = UIModel()
     lazy var answerPanel = AnswerPanel(model: model)
-    lazy var settings = SettingsWindowController(speaker: speaker)
+    lazy var settings = SettingsWindowController(speaker: speaker) { [weak self] in
+        MainActor.assumeIsolated { self?.history.present() }
+    }
     var escape: EscapeToStop?
 
     // Per-request
@@ -700,6 +783,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var cardThreadID: String?          // thread shown in the answer card
     var forceContinue = false          // "Follow up" button
     var hideWork: DispatchWorkItem?
+    let history = HistoryWindowController()
 
     /// Another process of this app, by bundle id, excluding ourselves.
     func otherRunningCopy() -> NSRunningApplication? {
@@ -749,6 +833,24 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         model.onDismiss = { [weak self] in self?.stopSpeaking(); self?.answerPanel.orderOut(nil) }
         model.onFollowUp = { [weak self] in self?.forceContinue = true; self?.begin() }
+        model.onSubmit = { [weak self] in
+            guard let self, self.state == .listening else { return }
+            self.submit()
+        }
+        model.onCancel = { [weak self] in self?.cancel() }
+        model.onBeginEditing = { [weak self] in
+            // Typing replaces dictation for this request; stop the mic so the two
+            // can't fight over the same box.
+            guard let self, self.listening else { return }
+            Task { _ = await self.transcriber.stop(); self.listening = false; self.model.canHear = false }
+        }
+        transcriber.onLevel = { [weak self] level in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.model.micLevel = level
+                if level > 0.02 { self.model.heardAnything = true }
+            }
+        }
         model.onOpenInTerminal = { [weak self] in if let id = self?.cardThreadID { self?.openInTerminal(id) } }
         hotKey = HotKey(keyCode: Config.hotKeyCode, modifiers: Config.hotKeyModifiers) { [weak self] in
             MainActor.assumeIsolated { self?.hotKeyPressed() }
@@ -765,6 +867,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if self.agentRun != nil { self.cancelAgent(reason: "esc"); return }
             self.stopSpeaking()
         })
+        history.onContinue = { [weak self] t in self?.openInTerminal(t.id) }
+        history.onOpenPane = { t in
+            DispatchQueue.global(qos: .utility).async {
+                ThreadPane.ensure(t)
+                if FileManager.default.isExecutableFile(atPath: ThreadPane.cmux) {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/cmux.app"))
+                }
+            }
+        }
         installBridge()
         AgentToken.rotate()          // new secret each launch
         AgentSocketServer.shared.start()
@@ -843,7 +954,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.submenu = sub
         }
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Show History in Finder", action: #selector(menuShowHistory), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "History…", action: #selector(menuShowHistory), keyEquivalent: "y").target = self
         menu.addItem(withTitle: "Settings…", action: #selector(menuSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Remote", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -855,7 +966,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stopSpeaking()
     }
     @objc func menuSettings() { settings.present() }
-    @objc func menuShowHistory() { NSWorkspace.shared.open(Config.historyDir) }
+    @objc func menuShowHistory() { history.present() }
     /// Show a thread's card and make it the one ⌥⇧A continues.
     @objc func menuOpenThread(_ item: NSMenuItem) {
         guard let id = item.representedObject as? String, var t = Threads.all().first(where: { $0.id == id }) else { return }
@@ -882,15 +993,20 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func openInTerminal(_ id: String) {
         let dir = Config.supportDir.path
         let cmux = "/Applications/cmux.app/Contents/Resources/bin/cmux"
+        // Taking it over here means Remote stops writing to that session.
+        Ownership.takeOver(id)
+        // samepage first, so the session arrives knowing what else is open on
+        // this machine and can leave its own note.
+        let command = "command -v samepage >/dev/null 2>&1 && samepage --task 'Continuing a Remote thread'; claude --resume \(id)"
         if FileManager.default.isExecutableFile(atPath: cmux) {
             let p = Process(); p.executableURL = URL(fileURLWithPath: cmux)
-            p.arguments = ["new-workspace", "--name", "Remote", "--cwd", dir, "--command", "claude --resume \(id)"]
+            p.arguments = ["new-workspace", "--name", "Remote thread", "--cwd", dir, "--command", command]
             if (try? p.run()) != nil {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/cmux.app"))
                 return
             }
         }
-        let script = "tell application \"Terminal\" to do script \"cd '\(dir)' && claude --resume \(id)\"\ntell application \"Terminal\" to activate"
+        let script = "tell application \"Terminal\" to do script \"cd '\(dir)' && \(command)\"\ntell application \"Terminal\" to activate"
         NSAppleScript(source: script)?.executeAndReturnError(nil)
     }
 
@@ -949,6 +1065,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             guard !shots.isEmpty else { state = .idle; fail("No displays to capture."); return }
             model.transcript = ""; model.marks = 0
+            model.transcriptEdited = false; model.editing = false
+            model.heardAnything = false; model.micLevel = 0
+            model.inputName = Transcriber.defaultInputName()
             // Continue the latest thread if it was used recently (or "Follow up" was pressed).
             let latest = Threads.all().first
             model.threadTitle = latest?.title ?? ""
@@ -1008,7 +1127,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard state == .listening else { return }
         switch Int(e.keyCode) {
         case kVK_Return, kVK_ANSI_KeypadEnter: submit()
-        case kVK_Escape: cancel()
+        case kVK_Escape:
+            if model.editing { model.editing = false; hud?.window?.makeFirstResponder(views.first); return }
+            cancel()
         case kVK_Tab: if model.hasThread { model.continuing.toggle() }
         case kVK_Delete, kVK_ForwardDelete: views.forEach { $0.clear() }
         default: break
@@ -1094,7 +1215,19 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         agentRun = holder
 
         do {
-            let answer = try await act(thread: thread, isNew: isNew, attachments: attachments, holder: holder, dir: dir)
+            let actions = ActionLog()
+            let answer: String
+            if Config.answerOnly {
+                let (text, _) = try await Claude.ask(transcript: transcript, frontApp: frontApp,
+                                                     attachments: attachments,
+                                                     session: .init(id: thread.id, isNew: isNew, name: "Remote · \(thread.title)"))
+                answer = text
+            } else {
+                answer = try await act(thread: thread, isNew: isNew, attachments: attachments, holder: holder, dir: dir) {
+                    actions.add($0)
+                }
+            }
+            entry.actions = actions.all
             guard token == requestToken else { return }
             agentRun = nil
             stopCommandListener()
@@ -1138,13 +1271,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// One turn. If resuming the Claude session fails, start it fresh under the same id.
-    private func act(thread: ChatThread, isNew: Bool, attachments: [Attachment], holder: Agent.Run, dir: URL) async throws -> String {
+    private func act(thread: ChatThread, isNew: Bool, attachments: [Attachment], holder: Agent.Run, dir: URL,
+                     onAction: @escaping (String) -> Void) async throws -> String {
         let name = "Remote · \(thread.title)"
         do {
             return try await Agent.run(transcript: model.question, frontApp: frontApp, attachments: attachments,
                                        session: .init(id: thread.id, isNew: isNew, name: name),
                                        threadDir: dir, approve: "ask", trace: nil, run: holder) { tool, input in
                 log("model tool \(tool) \(input.prefix(180))")
+                onAction(Entry.describe(tool: tool, input: input))
             }
         } catch is AgentStopped {
             throw AgentStopped()
@@ -1156,6 +1291,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                        session: .init(id: thread.id, isNew: true, name: name),
                                        threadDir: dir, approve: "ask", trace: nil, run: fresh) { tool, input in
                 log("model tool \(tool) \(input.prefix(180))")
+                onAction(Entry.describe(tool: tool, input: input))
             }
         }
     }
@@ -1271,7 +1407,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func heard(_ text: String) {
-        if state == .listening { model.transcript = text; return }
+        if state == .listening {
+            // Once you have clicked into the box, the words are yours.
+            if !model.transcriptEdited { model.transcript = text }
+            return
+        }
         guard listening else { return }
         if saidStop(text) { cancelAgent(reason: "said stop"); return }
         if state == .approving, let yes = yesNo(text) { finishApproval(yes, reason: "speech") }
@@ -1292,6 +1432,41 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func words(_ text: String) -> [String] {
         text.lowercased().split { !$0.isLetter }.map(String.init)
     }
+}
+
+/// Records for four seconds and says what the microphone actually delivered:
+/// the device, the format, the loudest sample, and whatever was transcribed.
+func micCheck() async {
+    // Launched from a shell, TCC blames the calling terminal and kills the
+    // process for a missing usage string, so this is meant to be run as the app
+    // (`open -n /Applications/Remote.app --args --mic-check`) and writes its
+    // report to a file as well as to stdout.
+    let report = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/Remote-mic-check.txt")
+    var lines: [String] = []
+    func say(_ s: String) {
+        print(s)
+        lines.append(s)
+        try? lines.joined(separator: "\n").appending("\n").write(to: report, atomically: true, encoding: .utf8)
+    }
+    say("input device: \(Transcriber.defaultInputName())")
+    if let problem = await Transcriber.requestPermissions() { say("permissions: \(problem)"); exit(1) }
+    let t = Transcriber()
+    var loudest: Float = 0
+    t.onLevel = { loudest = max(loudest, $0) }
+    t.onPartial = { say("heard: \($0)") }
+    do { try t.start() } catch { say("start failed: \(error.localizedDescription)"); exit(1) }
+    say("recording for 4 seconds, say something…")
+    try? await Task.sleep(for: .seconds(4))
+    let text = await t.stop()
+    say(String(format: "peak level: %.4f", loudest))
+    say("transcript: \(text.isEmpty ? "(nothing)" : text)")
+    if loudest < 0.005 {
+        say("verdict: the microphone delivered silence. Check the input device and that nothing else holds it.")
+        exit(2)
+    }
+    say("verdict: the microphone works\(text.isEmpty ? ", but nothing was recognised" : "")")
+    exit(0)
 }
 
 // MARK: - Self-test (no UI): capture, mark the centre, ask, print, speak.
@@ -1366,6 +1541,9 @@ if args.contains("--mcp-server") {
 } else if let i = args.firstIndex(of: "--selftest-agent") {
     let q = i + 1 < args.count && !args[i + 1].hasPrefix("--") ? args[i + 1] : "Open my Downloads folder"
     Task { await Agent.selfTest(request: q) }
+    RunLoop.main.run()
+} else if args.contains("--mic-check") {
+    Task { await micCheck() }
     RunLoop.main.run()
 } else if let i = args.firstIndex(of: "--follow"), i + 1 < args.count {
     Follower.run(threadID: args[i + 1])

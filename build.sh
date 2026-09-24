@@ -28,5 +28,9 @@ echo "built $APP"
 pkill -x Remote 2>/dev/null || true
 rm -rf "/Applications/Remote.app"
 cp -R "$APP" /Applications/
-open "/Applications/Remote.app"
+# Launch through LaunchServices, detached from this terminal. A process started
+# from a terminal inherits that terminal's privacy attribution, and a terminal
+# without microphone access makes the mic deliver silence rather than an error.
+osascript -e 'tell application "/Applications/Remote.app" to activate' >/dev/null 2>&1 ||
+  open "/Applications/Remote.app"
 echo "installed and launched /Applications/Remote.app"

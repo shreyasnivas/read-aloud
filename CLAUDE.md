@@ -15,6 +15,7 @@ Sources/Agent.swift    operator loop: stream-json `claude -p`, process group, ca
 Sources/MCPServer.swift  MCP server and M1 tools, safety policy, socket to the app
 Sources/Control.swift  M2 clicks, typing, and the accessibility tree
 Sources/ThreadPane.swift  the background cmux pane per thread, takeover, `--follow`
+Sources/HistoryWindow.swift  the thread window: turns, screenshots, actions, handoff
 Resources/AppIcon.icns app icon (generated, don't hand-edit)
 tools/make-icon.swift  renders the icon: swift tools/make-icon.swift Resources/AppIcon.icns
 Info.plist             LSUIElement app, mic + speech usage strings
@@ -37,6 +38,9 @@ ApplicationServices).
                             # headless operator: approve auto-denies, prints tool calls
 "build/Remote.app/Contents/MacOS/Remote" --mcp-selftest
                             # MCP server lists tools, calls spotlight and say_progress
+open -n /Applications/Remote.app --args --mic-check
+                            # records 4s, reports device, peak level and transcript
+                            # to ~/Library/Logs/Remote-mic-check.txt
 open -n "/Applications/Remote.app" --args --transcribe-file x.aiff   # writes x.aiff.txt
 "…/MacOS/Remote" --settings   # open Settings at launch (debugging layout)
 ```
@@ -67,6 +71,26 @@ after installing so only one copy with the bundle id exists.
 4. The final line is spoken with `/usr/bin/say` (the system voice), and the
    answer card shows the thread. Progress lines before that are spoken too;
    other assistant text is not.
+
+**The HUD is a text box.** The live transcript is an editable field: click it
+and type, and speech stops overwriting what you wrote (`transcriptEdited`).
+A meter under it moves with your voice, and the HUD says so when the microphone
+has delivered nothing at all. Return asks, Esc leaves the field, Esc again cancels.
+
+**Launch the app through LaunchServices, never straight from a terminal.** A
+process started by a terminal inherits that terminal's privacy attribution, so
+an app launched from a shell whose terminal has no microphone access records
+digital silence with no error. `build.sh` activates it with `osascript`; if you
+launch it by hand, use Spotlight or Finder.
+
+**History is a window, not a folder.** The menu's History item opens a thread
+view: each turn shows what was said, the screenshots that went with it, what the
+agent did (`Entry.actions`, written from the streamed tool calls), and the
+answer. "Continue in Claude Code" hands the thread to a cmux pane running
+samepage and `claude --resume`, and marks the thread as taken over.
+
+**Settings carries the behaviour switches.** Operator or answer-only
+(`Config.answerOnly`), the per-thread cmux pane, copy last transcript, history.
 
 **Every thread gets a pane.** When a thread starts, Remote opens a cmux workspace
 for it in the background, unfocused, running `Remote --follow <thread>`. That
