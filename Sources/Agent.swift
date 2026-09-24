@@ -96,6 +96,13 @@ enum Agent {
     /// The first `claude` that can route permission prompts to our MCP tool.
     /// Homebrew's 2.1.114 build has `--chrome` but not `--permission-prompt-tool`.
     /// A GUI launch often has a short PATH, so nvm's copy is searched too.
+    ///
+    /// Wrappers are skipped. cmux ships a `claude` shell script that picks a
+    /// real binary out of PATH when it runs, so asking it what flags exist and
+    /// then running it can hit two different versions: `--help` answered from
+    /// 2.1.281 while the run landed on Homebrew's 2.1.114, which rejected
+    /// `--system-prompt-snapshot`. Only a real binary is used, and `launch`
+    /// puts its own directory first in PATH so a child `claude` matches.
     static func operatorBinary() -> String? {
         var seen = Set<String>()
         var candidates: [String] = []
@@ -119,9 +126,25 @@ enum Agent {
             }
         }
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            guard !isWrapper(path) else { continue }
             if helpText(path).contains("--permission-prompt-tool") { return path }
         }
         return nil
+    }
+
+    /// True for a shell script standing in front of the real CLI, which may
+    /// resolve to a different version than the one we asked about.
+    static func isWrapper(_ path: String) -> Bool {
+        if path.hasPrefix("/Applications/") && path.contains(".app/") { return true }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        let head = (try? handle.read(upToCount: 2048)) ?? Data()
+        guard let text = String(data: head, encoding: .utf8) else { return false }
+        guard text.hasPrefix("#!") else { return false }
+        // Narrow on purpose: a script that hunts PATH for another `claude`.
+        // The official `~/.claude/local/claude` launcher points at one fixed
+        // version and is fine to use.
+        return text.contains("find_real_claude") || text.contains("for d in $PATH")
     }
 
     private static var helpCache: [String: String] = [:]
@@ -278,7 +301,10 @@ enum Agent {
         p.arguments = args
         p.currentDirectoryURL = Config.supportDir
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+        // The chosen binary's own directory comes first, so a `claude` the child
+        // resolves for itself is the same version we read the flags from.
+        let binDir = URL(fileURLWithPath: bin).deletingLastPathComponent().path
+        env["PATH"] = binDir + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
         env["ANTHROPIC_API_KEY"] = nil
         env["ANTHROPIC_AUTH_TOKEN"] = nil
         env["READBACK_NESTED"] = "1"

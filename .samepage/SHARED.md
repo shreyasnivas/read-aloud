@@ -12,3 +12,4 @@ A correction edits the line it corrects; never append a contradiction.
 `- YYYY-MM-DD (agent) the fact`
 
 ## Log
+- 2026-09-23 (grok) Commands start from Option-Shift-A only. No always-on wake phrase.

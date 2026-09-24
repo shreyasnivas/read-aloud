@@ -12,3 +12,4 @@ build/
 /.samepage/events.log
 /.samepage/STATUS.md
 /.samepage/sync.sig
+.claude/settings.local.json

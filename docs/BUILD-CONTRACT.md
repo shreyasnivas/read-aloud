@@ -276,3 +276,22 @@ Append to the handoff log below at every milestone gate.
 - 2026-09-23, Grok: Shreyas rejected the wake phrase. A command starts only when
   he presses ⌥⇧A. He talks, draws, and the screen is captured, then Return
   sends it and Escape cancels. The mic is not open while the app is idle.
+- 2026-09-24, Claude: fixed the operator's Claude binary. Every agent turn was
+  failing with `unknown option '--system-prompt-snapshot'`: the flag check read
+  `--help` from cmux's wrapper script, which resolves a real `claude` out of
+  PATH when it runs, so help came from 2.1.281 and the run landed on Homebrew's
+  2.1.114. `operatorBinary()` now skips scripts that hunt PATH for another
+  `claude`, and `launch` puts the chosen binary's own directory first in PATH.
+  Tested after `./build.sh --no-install`: `--selftest-agent "Open my Downloads
+  folder"` used the nvm 2.1.281 binary, ran `open ~/Downloads`, checked Finder's
+  front window and answered. `--selftest-agent "Send an email to Ankit saying
+  the brochure is signed off"` composed an Outlook message, and the approval
+  step auto-denied it with "Send this to Ankit?"; nothing was sent.
+  `--mcp-selftest` printed `safety: ok`, `coord: ok`, `approve deny/allow: ok`,
+  `click headless deny: ok`, `mcp-selftest: ok`. `--selftest "What's in the red
+  circle?"` did two turns (14.5s, then 11.2s) and the second remembered the
+  first. Still unverified, needs a person: S3, S4, S7, S8, S9, S10.
+  Open finding, not fixed: the child inherits every MCP server configured for
+  the user. In the email run it searched Outlook mail through Microsoft 365
+  before drafting. Consider `--strict-mcp-config` so the operator sees only our
+  own server and Chrome.
