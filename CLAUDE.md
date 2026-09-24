@@ -14,6 +14,7 @@ Sources/UI.swift       SwiftUI: UIModel, listening HUD, status pill, answer card
 Sources/Agent.swift    operator loop: stream-json `claude -p`, process group, cancel
 Sources/MCPServer.swift  MCP server and M1 tools, safety policy, socket to the app
 Sources/Control.swift  M2 clicks, typing, and the accessibility tree
+Sources/ThreadPane.swift  the background cmux pane per thread, takeover, `--follow`
 Resources/AppIcon.icns app icon (generated, don't hand-edit)
 tools/make-icon.swift  renders the icon: swift tools/make-icon.swift Resources/AppIcon.icns
 Info.plist             LSUIElement app, mic + speech usage strings
@@ -66,6 +67,16 @@ after installing so only one copy with the bundle id exists.
 4. The final line is spoken with `/usr/bin/say` (the system voice), and the
    answer card shows the thread. Progress lines before that are spoken too;
    other assistant text is not.
+
+**Every thread gets a pane.** When a thread starts, Remote opens a cmux workspace
+for it in the background, unfocused, running `Remote --follow <thread>`. That
+follower prints the conversation as it happens by reading `history/`, so the
+thread is always there to look at without taking the screen. Only one process
+writes to a Claude Code session: the follower reads, voice writes. Press return
+in the pane and it hands over, writing `taken-over/<thread>` in the support
+directory and exec'ing `claude --resume <id>`; from then on Remote leaves that
+thread alone and a spoken request starts a new one. Turn it off with
+`defaults write dev.readaloud.ReadAloud threadPane -bool false`.
 
 **Threads** are Claude Code sessions. A new thread uses `--session-id <uuid>
 --name …` and follow-ups use `--resume <uuid>`. ⌥⇧A within 15 minutes continues

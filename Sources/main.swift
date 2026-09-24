@@ -838,8 +838,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Continue the latest thread if it was used recently (or "Follow up" was pressed).
             let latest = Threads.all().first
             model.threadTitle = latest?.title ?? ""
-            model.hasThread = latest != nil
-            model.continuing = latest != nil && (forceContinue || Date().timeIntervalSince(latest!.lastUsed) < Threads.continueWindow)
+            // A thread you took over in its pane is yours; a spoken request starts a new one.
+            let takenOver = latest.map { Ownership.isTakenOver($0.id) } ?? false
+            model.hasThread = latest != nil && !takenOver
+            model.continuing = latest != nil && !takenOver
+                && (forceContinue || Date().timeIntervalSince(latest!.lastUsed) < Threads.continueWindow)
             forceContinue = false
             do { try transcriber.start(); listening = true }
             catch { listening = false; log("mic/transcriber failed to start: \(error.localizedDescription)") }
@@ -962,7 +965,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The thread: continue the latest one, or start a new Claude Code session.
         var thread: ChatThread
         var isNew: Bool
-        if model.continuing, let latest = Threads.all().first {
+        if model.continuing, let latest = Threads.all().first, !Ownership.isTakenOver(latest.id) {
             thread = latest; isNew = false
         } else {
             thread = ChatThread(id: UUID().uuidString.lowercased(), title: Threads.title(for: transcript, frontApp: frontApp),
@@ -971,6 +974,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         thread.lastUsed = started
         Threads.upsert(thread)
+        // The thread gets a cmux pane of its own, in the background, so it can be
+        // watched without taking the screen. Off the main actor: cmux is a process.
+        let paneThread = thread
+        DispatchQueue.global(qos: .utility).async { ThreadPane.ensure(paneThread); Ownership.prune() }
         cardThreadID = thread.id
         model.threadTitle = thread.title
         model.earlier = Threads.turns(thread.id).map { ($0.transcript, $0.answer ?? $0.error ?? "") }
@@ -1247,6 +1254,8 @@ if args.contains("--mcp-server") {
     let q = i + 1 < args.count && !args[i + 1].hasPrefix("--") ? args[i + 1] : "Open my Downloads folder"
     Task { await Agent.selfTest(request: q) }
     RunLoop.main.run()
+} else if let i = args.firstIndex(of: "--follow"), i + 1 < args.count {
+    Follower.run(threadID: args[i + 1])
 } else if let i = args.firstIndex(of: "--transcribe-file"), i + 1 < args.count {
     let f = args[i + 1]
     Task { await transcribeFileTest(f) }
