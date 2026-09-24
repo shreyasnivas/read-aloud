@@ -1,6 +1,6 @@
-// MCP server inside the Read Aloud binary (`ReadAloud --mcp-server`).
+// MCP server inside the Remote binary (`Remote --mcp-server`).
 // JSON-RPC 2.0, one message per line on stdin/stdout. Logs go to stderr
-// and ~/Library/Logs/ReadAloud.log, never to stdout.
+// and ~/Library/Logs/Remote.log, never to stdout.
 //
 // UI (approval, spoken progress) goes through a Unix socket to the running
 // app. Headless runs pass `--approve deny` and never touch that socket.
@@ -457,7 +457,7 @@ enum MCPServer {
         if NSScreen.screens.first != nil { print("coord: ok") }
         print("safety: ok")
         let exe = Agent.executablePath()
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("readaloud-mcp-selftest-\(getpid())", isDirectory: true)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("remote-mcp-selftest-\(getpid())", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let p = Process()
@@ -477,10 +477,10 @@ enum MCPServer {
             let initR = try client.request(method: "initialize", params: [
                 "protocolVersion": "2024-11-05",
                 "capabilities": [:],
-                "clientInfo": ["name": "readaloud-selftest", "version": "0.1.0"],
+                "clientInfo": ["name": "remote-selftest", "version": "0.1.0"],
             ])
             let ver = (initR["serverInfo"] as? [String: Any])?["name"] as? String
-            if ver != "readaloud" { failures.append("initialize name \(ver ?? "nil")") }
+            if ver != "remote" { failures.append("initialize name \(ver ?? "nil")") }
             client.notify(method: "notifications/initialized")
             let listed = try client.request(method: "tools/list", params: [:])
             let tools = (listed["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []
@@ -564,7 +564,7 @@ private final class Server {
             return rpc(id, [
                 "protocolVersion": ver,
                 "capabilities": ["tools": ["listChanged": false]],
-                "serverInfo": ["name": "readaloud", "version": "0.1.0"],
+                "serverInfo": ["name": "remote", "version": "0.1.0"],
             ])
         case "ping":
             return rpc(id, [:])
@@ -788,7 +788,7 @@ private final class Server {
         let cwd = ((args["cwd"] as? String ?? "") as NSString).expandingTildeInPath
         let task = args["task"] as? String ?? ""
         let name = (args["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            ? (args["name"] as? String)! : "Read Aloud"
+            ? (args["name"] as? String)! : "Remote"
         guard !cwd.isEmpty, !task.isEmpty else { return ToolResult(text: "Need cwd and task", isError: true) }
         trace("tool cmux_handoff cwd=\(cwd) decision=allow")
         let command = "claude \(shellQuote(task))"
@@ -937,7 +937,7 @@ private final class MCPClient {
         let id = next; next += 1
         try send(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
         let msg = try readMessage()
-        if let err = msg["error"] { throw NSError(domain: "ReadAloud", code: 4, userInfo: [NSLocalizedDescriptionKey: "\(err)"]) }
+        if let err = msg["error"] { throw NSError(domain: "Remote", code: 4, userInfo: [NSLocalizedDescriptionKey: "\(err)"]) }
         return msg["result"] as? [String: Any] ?? [:]
     }
 
@@ -971,6 +971,6 @@ private final class MCPClient {
             if chunk.isEmpty { break }
             buf.append(chunk)
         }
-        throw NSError(domain: "ReadAloud", code: 5, userInfo: [NSLocalizedDescriptionKey: "no MCP response"])
+        throw NSError(domain: "Remote", code: 5, userInfo: [NSLocalizedDescriptionKey: "no MCP response"])
     }
 }

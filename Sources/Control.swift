@@ -139,7 +139,7 @@ enum Control {
     }
 
     private static func requireTrusted() -> String? {
-        AXIsProcessTrusted() ? nil : "Accessibility permission is off for Read Aloud. Turn it on in Settings, then try again."
+        AXIsProcessTrusted() ? nil : "Accessibility permission is off for Remote. Turn it on in Settings, then try again."
     }
 
     private static func click(_ args: [String: Any]) -> ToolResult {
