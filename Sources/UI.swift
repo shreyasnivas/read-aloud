@@ -16,6 +16,15 @@ final class UIModel: ObservableObject {
 
     @Published var phase: Phase = .idle
     @Published var transcript = ""
+    /// True once the text has been typed into, so live speech stops overwriting it.
+    @Published var transcriptEdited = false
+    @Published var editing = false
+    @Published var micLevel: Float = 0
+    @Published var inputName = "the microphone"
+    @Published var heardAnything = false
+    var onSubmit: (() -> Void)?
+    var onCancel: (() -> Void)?
+    var onBeginEditing: (() -> Void)?
     @Published var canHear = true
     @Published var answer = ""
     @Published var question = ""
@@ -165,12 +174,25 @@ struct ListeningHUD: View {
                 } else {
                     ProgressView().controlSize(.small).padding(.top, 1)
                 }
-                Text(headline)
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(model.transcript.isEmpty ? .white.opacity(0.75) : .white)
-                    .lineLimit(3).truncationMode(.head)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .animation(.easeOut(duration: 0.12), value: model.transcript)
+                if model.phase == .listening {
+                    TranscriptBox(model: model)
+                } else {
+                    Text(headline)
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(model.transcript.isEmpty ? .white.opacity(0.75) : .white)
+                        .lineLimit(3).truncationMode(.head)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .animation(.easeOut(duration: 0.12), value: model.transcript)
+                }
+            }
+            if model.phase == .listening && model.canHear && !model.heardAnything {
+                HStack(spacing: 7) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
+                    Text("No sound from \(model.inputName) yet. Check the input device, or just type.")
+                }
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             if model.phase == .listening && model.hasThread {
                 HStack(spacing: 6) {
@@ -188,9 +210,11 @@ struct ListeningHUD: View {
                 HStack(spacing: 16) {
                     Hint(key: "⏎", label: "Ask")
                     Hint(key: "esc", label: "Cancel")
-                    if model.marks > 0 { Hint(key: "⌫", label: "Clear marks") }
+                    if model.marks > 0 && !model.editing { Hint(key: "⌫", label: "Clear marks") }
                     Spacer()
-                    Text("Draw to point at something").foregroundStyle(.white.opacity(0.6))
+                    Text(model.editing ? "Editing — ⏎ to ask, esc to stop editing"
+                                       : "Click the text to edit it, or draw to point")
+                        .foregroundStyle(.white.opacity(0.6))
                 }
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.85))
@@ -209,6 +233,50 @@ struct ListeningHUD: View {
         if model.phase != .listening { return "Got it…" }
         if !model.canHear { return "I can't hear you (mic or speech permission is off). Press ⏎ to ask about the screen anyway." }
         return model.transcript.isEmpty ? "Listening… ask about what's on screen" : model.transcript
+    }
+}
+
+/// The live transcript, which is also an ordinary text field: click it and type.
+struct TranscriptBox: View {
+    @ObservedObject var model: UIModel
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("Listening… ask about what's on screen, or type it",
+                      text: $model.transcript, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1...4)
+                .focused($focused)
+                .onSubmit { model.onSubmit?() }
+                .onChange(of: focused) { _, now in
+                    model.editing = now
+                    if now { model.transcriptEdited = true; model.onBeginEditing?() }
+                }
+            MicMeter(level: model.micLevel, live: model.canHear && !model.editing)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A thin bar that moves with your voice, so a dead microphone is obvious.
+struct MicMeter: View {
+    let level: Float
+    let live: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.14))
+                Capsule()
+                    .fill(live ? Color(red: 0.55, green: 0.85, blue: 0.7) : .white.opacity(0.25))
+                    .frame(width: max(2, geo.size.width * CGFloat(min(1, level * 6))))
+                    .animation(.easeOut(duration: 0.08), value: level)
+            }
+        }
+        .frame(height: 3)
     }
 }
 
@@ -443,6 +511,10 @@ final class StatusPillPanel: NSPanel {
 // MARK: - Settings
 
 struct SettingsView: View {
+    @State private var mode = UserDefaults.standard.string(forKey: "mode") ?? "operator"
+    @State private var threadPane = UserDefaults.standard.object(forKey: "threadPane") as? Bool ?? true
+    @State private var copiedTranscript = false
+    var onHistory: (() -> Void)?
     @State private var tick = 0
     @State private var login = ClaudeLogin(installed: true, loggedIn: true)
     @State private var atLogin = SMAppService.mainApp.status == .enabled
@@ -464,6 +536,44 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.vertical, 4)
+            }
+
+            Section("Behaviour") {
+                Picker("When you press return", selection: $mode) {
+                    Text("Do it (operator)").tag("operator")
+                    Text("Just answer").tag("answer")
+                }
+                .pickerStyle(.radioGroup)
+                .onChange(of: mode) { _, v in UserDefaults.standard.set(v, forKey: "mode") }
+                Text(mode == "operator"
+                     ? "Acts on your Mac and asks before anything that sends, deletes or buys."
+                     : "Looks at the screen and answers out loud. Takes no action.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                Toggle("Open a cmux pane for each thread", isOn: $threadPane)
+                    .onChange(of: threadPane) { _, v in UserDefaults.standard.set(v, forKey: "threadPane") }
+                Text("The pane follows the conversation in the background. Press return in it to take the thread over.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Threads") {
+                HStack {
+                    Button("History…") { onHistory?() }
+                    Button("Copy last transcript") {
+                        let last = History.all().first?.0.transcript ?? ""
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(last, forType: .string)
+                        copiedTranscript = true
+                    }
+                    .disabled(History.all().first?.0.transcript.isEmpty ?? true)
+                    if copiedTranscript {
+                        Text("Copied").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Show files") { NSWorkspace.shared.open(Config.historyDir) }
+                }
+                Text("Remote keeps the newest \(Config.historyLimit) threads, with their screenshots and what it did.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Permissions") {
@@ -553,12 +663,12 @@ enum Relaunch {
 /// While the window is open Remote is a normal app (Dock icon, ⌘Q, ⌘,);
 /// when it's closed it lives in the menu bar only.
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
-    convenience init(speaker: Speaker) {
+    convenience init(speaker: Speaker, onHistory: (() -> Void)? = nil) {
         // Fixed size on purpose: a self-sizing hosting view plus the live
         // permission refresh makes AppKit's layout loop and throw.
-        let host = NSHostingView(rootView: SettingsView(speaker: speaker))
+        let host = NSHostingView(rootView: SettingsView(onHistory: onHistory, speaker: speaker))
         host.sizingOptions = []
-        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 500, height: 700),
+        let w = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 520, height: 780),
                          styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         w.contentView = host
         w.title = "Remote"
