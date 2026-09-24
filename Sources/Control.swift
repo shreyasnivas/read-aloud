@@ -137,8 +137,13 @@ enum Control {
         switch name {
         case "click":
             guard let x = number(args["x"]), let y = number(args["y"]),
-                  let point = cgPoint(pixelX: x, pixelY: y, displayIndex: Int(number(args["display"]) ?? 1)),
-                  let label = elementLabel(at: point) else { return nil }
+                  let point = cgPoint(pixelX: x, pixelY: y, displayIndex: Int(number(args["display"]) ?? 1))
+            else { return ("Click where you can't see?", "no coordinates") }
+            // Fail closed. An icon-only button has no label, and "no label" used
+            // to read as "safe", which is how a send arrow gets pressed unasked.
+            guard let label = elementLabel(at: point) else {
+                return ("Press the control at \(Int(x)), \(Int(y))?", "unlabelled control")
+            }
             guard let word = riskyControl(label) else { return nil }
             return ("Press \(label.prefix(40))?", "\(word): \(label)")
         case "type_text":
@@ -171,7 +176,19 @@ enum Control {
         var element: AXUIElement?
         guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &element) == .success,
               let element else { return nil }
-        for attr in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
+        if let own = text(of: element) { return own }
+        // An icon inside a button: the button above it usually carries the name.
+        var parent: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,
+           let p = parent, let up = text(of: p as! AXUIElement) {
+            return up
+        }
+        return nil
+    }
+
+    private static func text(of element: AXUIElement) -> String? {
+        for attr in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute,
+                     "AXHelp", "AXRoleDescription", "AXLabel"] {
             var v: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, attr as CFString, &v) == .success,
                let s = v as? String, !s.trimmingCharacters(in: .whitespaces).isEmpty {

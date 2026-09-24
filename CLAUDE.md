@@ -102,10 +102,19 @@ it afterwards. While a permission question is up, Esc means no. It also stops a
   AppleScript text were checked while clicks, typing and `open_target` were not,
   so the agent could press Send, run a `.command` file, or press a button through
   AppleScript UI scripting (`perform action "AXPress"`) with no question asked.
-  A click now reads the accessibility label under the pointer and asks on
+  A click reads the accessibility label under the pointer and asks on
   send/delete/buy-like buttons, typing asks in a password field, `open_target`
   asks before running a file or handing a URL to a custom scheme, and reading a
   credentials path asks. Add a case to `Safety.selfCheck()` for every new rule.
+
+- **Every one of those checks has to fail closed, and normalise first.** Three
+  bypasses came from failing open: an unlabelled icon button read as "safe"
+  (now it asks), `file:///…/x.command` skipped the runnable check because a
+  recognised scheme returned early (now a file URL is decoded back to a path),
+  and a trailing slash beat `hasSuffix(".app")`. AppleScript's own `read` and
+  `POSIX file` were missed because the script check only looked for mutation,
+  not for reading. A keyword list is a bar, not a boundary: a button labelled
+  "Ship it" still matches nothing.
 
 - **Approvals are authenticated and scoped.** Each launch writes a fresh secret
   to `agent.token`; the MCP children carry it and the socket refuses anything

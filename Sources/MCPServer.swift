@@ -41,17 +41,24 @@ enum Safety {
     /// a file redirect, a tier-3 word, or a command outside the list asks.
     /// Nil when opening it is as safe as a double-click on a document.
     static func openNeedsApproval(_ target: String) -> String? {
-        let t = target.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = t.lowercased()
+        var t = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        var lower = t.lowercased()
         if let scheme = lower.range(of: "://").map({ String(lower[lower.startIndex..<$0.lowerBound]) }) {
             let safe = ["http", "https", "file", "ftp"]
-            return safe.contains(scheme) ? nil : "Open this with \(scheme)?"
+            guard safe.contains(scheme) else { return "Open this with \(scheme)?" }
+            // A file: URL is just a path in disguise, so it still has to face the
+            // runnable check below. Prefixing file:// used to skip it entirely.
+            guard scheme == "file" else { return nil }
+            t = String(t.dropFirst("file://".count)).removingPercentEncoding ?? String(t.dropFirst("file://".count))
+            lower = t.lowercased()
         }
         if lower.hasPrefix("mailto:") { return nil }
         if lower.contains(":") && !lower.contains("/") && !lower.hasPrefix("-") {
             // A bare custom scheme such as someapp:run?macro=…
             return "Open this with another app?"
         }
+        // A trailing slash is how Finder and tab completion write a bundle path.
+        while lower.hasSuffix("/") { lower.removeLast() }
         let runnable = [".command", ".sh", ".bash", ".zsh", ".scpt", ".applescript", ".workflow",
                         ".app", ".pkg", ".dmg", ".terminal", ".shortcut", ".jar", ".py", ".rb", ".pl"]
         if let ext = runnable.first(where: { lower.hasSuffix($0) }) {
@@ -86,6 +93,11 @@ enum Safety {
         let s = script.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.isEmpty { return false }
         if isTier3(s) || hasMutation(s) { return false }
+        // AppleScript reads files too, and reading a file is a decision about
+        // what leaves this machine, not a mutation.
+        let lower0 = s.lowercased()
+        if lower0.contains("posix file") || lower0.range(of: #"\bread\b"#, options: .regularExpression) != nil { return false }
+        if readsSecrets(s) { return false }
         let lower = s.lowercased()
         let reads = ["activate", "get ", "name of", "count ", "exists", "properties", "return ", "front window", "front document"]
         return reads.contains { lower.contains($0) }
@@ -147,6 +159,14 @@ enum Safety {
             (openNeedsApproval("mailto:a@b.com?body=hi") == nil, "open mail"),
             (openNeedsApproval("~/Downloads/installer.command") != nil, "open command file"),
             (openNeedsApproval("somemacroapp://run?macro=wipe") != nil, "open custom scheme"),
+            // A recognised scheme must not skip the "is this runnable" check.
+            (openNeedsApproval("file:///Users/x/Downloads/installer.command") != nil, "open file url command"),
+            (openNeedsApproval("file:///Applications/Something.app") != nil, "open file url app"),
+            (openNeedsApproval("~/Downloads/installer.app/") != nil, "open trailing slash"),
+            (openNeedsApproval("file:///Users/x/Documents/deck.key") == nil, "open file url document"),
+            // AppleScript can read a file too, and that path never saw the check.
+            (!applescriptIsFree("tell application \"Finder\" to return (read (POSIX file \"/Users/x/.ssh/id_rsa\") as text)"), "as read secret"),
+            (!applescriptIsFree("return (read (POSIX file \"/Users/x/notes.txt\") as text)"), "as read file"),
         ]
         let bad = cases.filter { !$0.0 }.map(\.1)
         return bad.isEmpty ? nil : "safety mismatch: \(bad.joined(separator: ", "))"
